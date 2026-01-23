@@ -1,0 +1,2 @@
+google-cloud-texttospeech
+gradio==6.3.0
