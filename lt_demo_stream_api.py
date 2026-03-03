@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.append('third_party/Matcha-TTS')
 
 import torch
+from cosyvoice.cli.cosyvoice import CosyVoice3
 from fastcosyvoice import FastCosyVoice3
 
 
@@ -211,6 +212,48 @@ def synthesize_streaming(
             #audio_chunks.append(pcm_bytes)
 
 
+def synthesize_streaming_basic(
+    cosyvoice: CosyVoice3,
+    text: str,
+    prompt_text: str,
+    spk_id: str,
+    sample_rate: int,
+):
+    """
+    Performs streaming synthesis of text through parallel pipeline and returns metrics.
+    
+    Args:
+        cosyvoice: FastCosyVoice3 model
+        text: Text for synthesis
+        prompt_text: Reference audio transcription
+        spk_id: Speaker ID
+        sample_rate: Sample rate
+    
+    Returns:
+
+    """
+
+    # Create generator first (no computation yet)
+    generator = cosyvoice.inference_zero_shot(
+        tts_text=text,
+        prompt_text=prompt_text,
+        prompt_wav=REFERENCE_AUDIO,
+        zero_shot_spk_id=spk_id,
+        stream=True,
+    )
+    # Sync GPU before starting timer to ensure clean measurement
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    for model_output in generator:
+        #chunk_count += 1
+        
+        # Get speech tensor
+        speech = model_output['tts_speech']
+        yield speech
+
+
+
 def load_model():
     # Check for reference audio
     if not os.path.exists(REFERENCE_AUDIO):
@@ -308,6 +351,72 @@ def load_model():
         print("\n🔥 Warming up model (compiling graphs for different text lengths)...")
         warmup_model(cosyvoice, prompt_text, spk_id)
         print("✅ Model warmed up and ready")
+
+    return cosyvoice, prompt_text, spk_id, sample_rate
+
+
+def load_model_basic():
+    # Check for reference audio
+    if not os.path.exists(REFERENCE_AUDIO):
+        logger.error(f"Reference audio not found: {REFERENCE_AUDIO}", exc_info=True)
+        return
+    
+    # Create output directory
+    #Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    
+    # Load prompt_text from txt file next to audio
+    prompt_text = load_prompt_text(REFERENCE_AUDIO, INSTRUCTION)
+    
+    print(f"\n🎤 Reference audio: {REFERENCE_AUDIO}")
+    print(f"📝 Texts for synthesis: {len(SYNTHESIS_TEXTS)}")
+    
+    load_start = time.time()
+    
+    cosyvoice = CosyVoice3(
+        model_dir=MODEL_DIR,
+        fp16=False,
+        load_vllm=False,
+        load_trt=False,
+    )
+    
+    load_time = time.time() - load_start
+    print(f"✅ Model loaded in {load_time:.2f} sec")
+    
+    
+    # dtype diagnostics
+    llm_dtype = next(cosyvoice.model.llm.parameters()).dtype
+    flow_dtype = next(cosyvoice.model.flow.parameters()).dtype
+    hift_dtype = next(cosyvoice.model.hift.parameters()).dtype
+    print(f"📊 LLM dtype: {llm_dtype}, Flow dtype: {flow_dtype}, HiFT dtype: {hift_dtype}")
+    
+    sample_rate = cosyvoice.sample_rate
+    print(f"📊 Sample rate: {sample_rate} Hz")
+    
+    
+    # Prepare speaker embeddings (once)
+    print("\n🎯 Preparing speaker embeddings...")
+    spk_id = "reference_speaker"
+    embed_start = time.time()
+    cosyvoice.add_zero_shot_spk(prompt_text, REFERENCE_AUDIO, spk_id)
+    embed_time = time.time() - embed_start
+    print(f"✅ Embeddings prepared in {embed_time:.3f} sec")
+    
+    # Warmup run to initialize CUDA kernels and allocate memory
+    print("\n🔥 Warmup run...")
+    warmup_text = "Тестовый прогрев модели."
+    warmup_start = time.time()
+    for _ in cosyvoice.inference_zero_shot(
+        tts_text=warmup_text,
+        prompt_text=prompt_text,
+        prompt_wav=REFERENCE_AUDIO,
+        zero_shot_spk_id=spk_id,
+        stream=True,
+    ):
+        pass  # Just iterate through to trigger computation
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    warmup_time = time.time() - warmup_start
 
     return cosyvoice, prompt_text, spk_id, sample_rate
 
