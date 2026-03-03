@@ -34,6 +34,8 @@ except ImportError:
     use_ttsfrd = False
 from cosyvoice.utils.file_utils import logging, load_wav
 from cosyvoice.utils.frontend_utils import contains_chinese, contains_cyrillic, replace_blank, replace_corner_mark, remove_bracket, spell_out_number, split_paragraph, is_only_punctuation
+from cosyvoice.tokenizer.tokenizer import get_qwen_tokenizer
+from cosyvoice.llm.llm import Qwen2Encoder3
 
 
 class CosyVoiceFrontEnd:
@@ -71,6 +73,14 @@ class CosyVoiceFrontEnd:
             self.zh_tn_model = ZhNormalizer(remove_erhua=False)
             self.en_tn_model = EnNormalizer()
             self.inflect_parser = inflect.engine()
+
+        Qwen3_model_dir='/home/longtou.2024/projects/FastCosyVoice/kayden_ckpt/Qwen3-1.7B'
+        
+        self.tokenizer_q_3=get_qwen_tokenizer(Qwen3_model_dir,skip_special_tokens=True)
+        
+        self.Qwen3=Qwen2Encoder3(Qwen3_model_dir).eval().to('cpu')
+        
+        
 
     def _extract_text_token(self, text):
         if isinstance(text, Generator):
@@ -166,9 +176,11 @@ class CosyVoiceFrontEnd:
         model_input = {'text': tts_text_token, 'text_len': tts_text_token_len, 'llm_embedding': embedding, 'flow_embedding': embedding}
         return model_input
 
-    def frontend_zero_shot(self, tts_text, prompt_text, prompt_wav, resample_rate, zero_shot_spk_id):
+    def frontend_zero_shot(self, caption, tts_text, prompt_text, prompt_wav, resample_rate, zero_shot_spk_id):
         tts_text_token, tts_text_token_len = self._extract_text_token(tts_text)
         if zero_shot_spk_id == '':
+            print("zero_shot_spk_id", zero_shot_spk_id)
+
             prompt_text_token, prompt_text_token_len = self._extract_text_token(prompt_text)
             speech_feat, speech_feat_len = self._extract_speech_feat(prompt_wav)
             speech_token, speech_token_len = self._extract_speech_token(prompt_wav)
@@ -178,11 +190,25 @@ class CosyVoiceFrontEnd:
                 speech_feat, speech_feat_len[:] = speech_feat[:, :2 * token_len], 2 * token_len
                 speech_token, speech_token_len[:] = speech_token[:, :token_len], token_len
             embedding = self._extract_spk_embedding(prompt_wav)
+            
+            
+            caption=torch.tensor(self.tokenizer_q_3.encode(caption, allowed_special='all'))
+            #mask=torch.ones(caption.size(1)).unsqueeze(0).long()
+            mask=torch.ones(1,caption.size(0)).long()
+            # with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            LM_latents = self.Qwen3.model(    
+                input_ids=caption.unsqueeze(0),
+                attention_mask=mask,
+                output_hidden_states=True,
+                return_dict=True,)
+            LM_latents=LM_latents.hidden_states[-1]
+            
+            
             model_input = {'prompt_text': prompt_text_token, 'prompt_text_len': prompt_text_token_len,
-                           'llm_prompt_speech_token': speech_token, 'llm_prompt_speech_token_len': speech_token_len,
-                           'flow_prompt_speech_token': speech_token, 'flow_prompt_speech_token_len': speech_token_len,
-                           'prompt_speech_feat': speech_feat, 'prompt_speech_feat_len': speech_feat_len,
-                           'llm_embedding': embedding, 'flow_embedding': embedding}
+                            'llm_prompt_speech_token': speech_token, 'llm_prompt_speech_token_len': speech_token_len,
+                            'flow_prompt_speech_token': speech_token, 'flow_prompt_speech_token_len': speech_token_len,
+                            'prompt_speech_feat': speech_feat, 'prompt_speech_feat_len': speech_feat_len,
+                            'llm_embedding': embedding, 'flow_embedding': embedding,'LM_latents':LM_latents}
         else:
             model_input = self.spk2info[zero_shot_spk_id]
         model_input['text'] = tts_text_token

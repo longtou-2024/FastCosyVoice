@@ -113,7 +113,7 @@ class FastCosyVoice3:
         self.model_dir = model_dir
         self.fp16 = fp16
         self.trt_llm_loaded = False
-        
+        #self.LM_latents = torch.load('LM_latents_angry.pt').to('cuda:0')
         # Download model if not exists
         if not os.path.exists(model_dir):
             model_dir = snapshot_download(model_id='FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir=model_dir)
@@ -170,10 +170,13 @@ class FastCosyVoice3:
             fp16
         )
 
-        llm_pt_path = os.path.join(model_dir, 'llm.pt')
-        flow_pt_path = os.path.join(model_dir, 'flow.pt')
-        hift_pt_path = os.path.join(model_dir, 'hift.pt')
-
+        # llm_pt_path = os.path.join(model_dir, 'llm.pt')
+        llm_pt_path = '/home/longtou.2024/projects/FastCosyVoice/kayden_ckpt/ave_llm.pt'
+        # llm_pt_path = '/home/kayden.k/FastCosyVoice/pretrained_models/llm/ave_llm.pt'
+        flow_pt_path = '/home/longtou.2024/projects/FastCosyVoice/kayden_ckpt/ave_flow.pt'
+        # flow_pt_path = os.path.join(model_dir, 'flow.pt')
+        # hift_pt_path = os.path.join(model_dir, 'hift.pt')
+        hift_pt_path = '/home/longtou.2024/projects/FastCosyVoice/kayden_ckpt/hift.pt'
         # If TRT-LLM artifacts already exist, we can skip loading PyTorch LLM to GPU entirely.
         # This avoids a large, unnecessary VRAM allocation (TRT-LLM handles LLM inference).
         # NOTE: If artifacts are missing, _load_trt_llm may need PyTorch LLM weights to build hf_merged.
@@ -390,6 +393,19 @@ class FastCosyVoice3:
         
         # Initialize TRT-LLM runner
         runtime_rank = tensorrt_llm.mpi_rank()
+
+        # Runtime input length must account for soft prompt virtual ids: sos + P + text + task_id + prompt_speech.
+        prompt_len = 0
+        try:
+            latent = getattr(self, "LM_latents", None)
+            if latent is not None and hasattr(latent, "shape"):
+                if len(latent.shape) == 3:
+                    prompt_len = int(latent.shape[1])
+                elif len(latent.shape) == 2:
+                    prompt_len = int(latent.shape[0])
+        except Exception:
+            prompt_len = 0
+        runtime_max_input_len = max(512, min(2048, 512 + prompt_len + 512))
         
         runner_kwargs = dict(
             engine_dir=trt_engines_dir,
@@ -397,7 +413,7 @@ class FastCosyVoice3:
             max_output_len=2048,
             enable_context_fmha_fp32_acc=False,
             max_batch_size=max_batch_size,
-            max_input_len=512,
+            max_input_len=runtime_max_input_len,
             max_tokens_in_paged_kv_cache=kv_cache_tokens,
             cuda_graph_mode=False,
             gather_generation_logits=False,
@@ -650,13 +666,31 @@ class FastCosyVoice3:
         logging.info('Step 2/2: Building TRT-LLM engines...')
         
         try:
+            # Enable prompt-table (p-tuning) so caption latents (llm_caption output)
+            # can be injected as a soft prompt at runtime.
+            prompt_len = 0
+            try:
+                latent = getattr(self, "LM_latents", None)
+                if latent is not None and hasattr(latent, "shape"):
+                    if len(latent.shape) == 3:
+                        prompt_len = int(latent.shape[1])
+                    elif len(latent.shape) == 2:
+                        prompt_len = int(latent.shape[0])
+            except Exception:
+                prompt_len = 0
+
+            # Runtime input is: sos + [P virtual prompt ids] + text_ids + task_id + prompt_speech_ids.
+            # Keep headroom for long text / prompt speech tokens.
+            max_input_len = max(512, min(2048, 512 + prompt_len + 512))
+
             build_cmd = [
                 'trtllm-build',
                 '--checkpoint_dir', trt_weights_dir,
                 '--output_dir', trt_engines_dir,
                 '--max_batch_size', str(max_batch_size),
-                '--max_input_len', '512',
+                '--max_input_len', str(max_input_len),
                 '--max_num_tokens', '2560',
+                '--max_prompt_embedding_table_size', str(512),
                 '--gemm_plugin', dtype,
             ]
             
@@ -701,6 +735,7 @@ class FastCosyVoice3:
         text: str,
         prompt_text: str,
         prompt_speech_tokens: list,
+        LM_latents : torch.Tensor,
         sampling: int = 25,
     ) -> Generator[int, None, None]:
         """
@@ -718,18 +753,53 @@ class FastCosyVoice3:
         """
         # Build input prompt using correct special tokens
         full_text = prompt_text + text
-        
-        # Convert prompt speech tokens to string format
-        prompt_speech_str = ''.join([f'<|s_{t}|>' for t in prompt_speech_tokens])
-        
-        # Build full prompt with CORRECT special tokens:
-        # <|s_6561|> = sos, <|s_6563|> = task_id
-        sos_token = f'<|s_{self.sos_speech_idx}|>'
-        task_id_token = f'<|s_{self.task_id_speech_idx}|>'
-        prompt = f"{sos_token}{full_text}{task_id_token}{prompt_speech_str}"
-        
-        # Tokenize
-        input_ids = self.trt_llm_tokenizer.encode(prompt)
+
+        # Caption latents are injected as a soft prompt via TRT-LLM prompt_table.
+        # Expected LM_latents shape: [1, P, H] (or [P, H]).
+        latent = LM_latents
+        if latent is None:
+            raise RuntimeError("TRT-LLM streaming requires LM_latents but got None")
+        if not isinstance(latent, torch.Tensor):
+            latent = torch.as_tensor(latent)
+        if latent.dim() == 2:
+            latent = latent.unsqueeze(0)
+        if latent.dim() != 3 or latent.size(0) != 1:
+            raise RuntimeError(f"Expected LM_latents shape [1, P, H] (or [P, H]); got {tuple(latent.shape)}")
+
+        prompt_len = int(latent.size(1))
+        max_pt = int(getattr(self.trt_llm_runner, "max_prompt_embedding_table_size", 0) or 0)
+        if max_pt <= 0:
+            raise RuntimeError(
+                "This TRT-LLM engine was built without prompt-table support (max_prompt_embedding_table_size=0). "
+                "Rebuild engines with trtllm-build --max_prompt_embedding_table_size >= P."
+            )
+        if prompt_len > max_pt:
+            raise RuntimeError(
+                f"LM_latents prompt length P={prompt_len} exceeds engine max_prompt_embedding_table_size={max_pt}. "
+                "Rebuild engines with a larger --max_prompt_embedding_table_size."
+            )
+
+        # Text ids (no BOS/EOS; we control special tokens explicitly)
+        text_ids = self.trt_llm_tokenizer.encode(full_text, add_special_tokens=False)
+
+        # Prompt speech ids in merged vocab
+        prompt_speech_ids = [self.speech_token_offset + int(t) for t in prompt_speech_tokens]
+
+        # Virtual prompt ids: [vocab_size, vocab_size + P)
+        base_vocab = int(getattr(self.trt_llm_runner, "vocab_size", 0) or 0)
+        if base_vocab <= 0:
+            raise RuntimeError("Could not determine TRT-LLM vocab_size for prompt virtual ids")
+        prompt_virtual_ids = list(range(base_vocab, base_vocab + prompt_len))
+
+        # Final input ids: sos + [soft prompt ids] + text + task_id + prompt_speech
+        input_ids = (
+            [int(self.sos_token_id)]
+            + prompt_virtual_ids
+            + [int(t) for t in text_ids]
+            + [int(self.task_id_token_id)]
+            + prompt_speech_ids
+        )
+
         batch_input_ids = [torch.tensor(input_ids, dtype=torch.int32)]
         input_length = len(input_ids)
         
@@ -765,7 +835,8 @@ class FastCosyVoice3:
                     output_sequence_lengths=True,
                     output_generation_logits=False,
                     return_dict=True,
-                    return_all_generated_tokens=True  # Get all tokens each iteration
+                    return_all_generated_tokens=True,  # Get all tokens each iteration
+                    prompt_table=latent,  # Soft prompt embeddings (caption latents)
                 )
                 
                 # Iterate over streaming outputs
@@ -804,6 +875,7 @@ class FastCosyVoice3:
         text: str,
         prompt_text: str,
         prompt_speech_tokens: list,
+        LM_latents: torch.Tensor,
         tokens_list: list,
         llm_end_flag: dict,
         tokens_lock,
@@ -821,6 +893,7 @@ class FastCosyVoice3:
                 text=text,
                 prompt_text=prompt_text,
                 prompt_speech_tokens=prompt_speech_tokens,
+                LM_latents=LM_latents,
                 sampling=sampling,
             ):
                 with tokens_lock:
@@ -868,7 +941,7 @@ class FastCosyVoice3:
             raise ValueError('zero_shot_spk_id cannot be empty')
         
         model_input = self.frontend.frontend_zero_shot(
-            '', prompt_text, prompt_wav, self.sample_rate, ''
+            'no_cap','', prompt_text, prompt_wav, self.sample_rate, ''
         )
         del model_input['text']
         del model_input['text_len']
@@ -907,6 +980,7 @@ class FastCosyVoice3:
         tts_text: str,
         prompt_text: str,
         prompt_wav: str,
+        caption : str,
         zero_shot_spk_id: str = '',
         text_frontend: bool = True,
         auto_stress: bool = False,
@@ -953,10 +1027,9 @@ class FastCosyVoice3:
                         f'Synthesis text "{text_chunk}" is shorter than prompt text, '
                         'this may lead to poor quality'
                     )
-            
             # Prepare model input
             model_input = self.frontend.frontend_zero_shot(
-                text_chunk, prompt_text, prompt_wav, self.sample_rate, zero_shot_spk_id
+                caption, text_chunk, prompt_text, prompt_wav, self.sample_rate, zero_shot_spk_id
             )
             
             start_time = time.time()
@@ -976,7 +1049,7 @@ class FastCosyVoice3:
                 # Start TRT-LLM thread
                 llm_thread = threading.Thread(
                     target=self._trt_llm_job,
-                    args=(text_chunk, prompt_text, prompt_speech_tokens,
+                    args=(text_chunk, prompt_text, prompt_speech_tokens,self.LM_latents,
                           tokens_list, llm_end_flag, tokens_lock),
                     daemon=True
                 )

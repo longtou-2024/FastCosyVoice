@@ -16,6 +16,7 @@ import logging
 
 from lt_demo_stream_api import load_model, synthesize_streaming
 from lt_demo_stream_api import load_model_basic, synthesize_streaming_basic
+from lt_demo_stream_api import synthesize_streaming_kayden
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,7 +35,7 @@ def _convert_pcm_to_numpy(pcm_bytes):
 @app.on_event("startup")
 async def startup_event():
     global model
-    model, prompt_text, spk_id, cosy_sample_rate = load_model_basic()
+    model, prompt_text, spk_id, cosy_sample_rate = load_model()
 
 class SynthesizeRequest(BaseModel):
     tts_text: str
@@ -59,7 +60,7 @@ async def generate_audio_stream(request: SynthesizeRequest):
         chunk_count = 0
         try:
             logger.info(f"[큐 입력] 합성 시작 - 텍스트: {kwargs['text']}")
-            for chunk in synthesize_streaming_basic(model, **kwargs):
+            for chunk in synthesize_streaming_kayden(model, **kwargs):
                 # tensor인 경우 numpy 배열로 변환
                 if isinstance(chunk, torch.Tensor):
                     chunk = chunk.cpu().numpy()

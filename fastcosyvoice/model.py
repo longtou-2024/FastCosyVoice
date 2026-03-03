@@ -45,7 +45,6 @@ class FastCosyVoice3Model:
     
     Pipeline architecture:
     [LLM Thread] → token_queue → [Flow+Hift Thread] → audio_queue → [Main Thread: yield]
-    
     Key insight: Flow+Hift run in their own thread, so their blocking operations
     (TensorRT sync, Hift CPU f0_predictor) don't affect LLM at all.
     """
@@ -83,13 +82,38 @@ class FastCosyVoice3Model:
                 Useful when using TRT-LLM (LLM runs outside PyTorch), to reduce VRAM usage.
         """
         if load_llm:
-            self.llm.load_state_dict(torch.load(llm_model, map_location=self.device), strict=True)
+            print(llm_model)
+            cpt=torch.load(llm_model, map_location=self.device)
+            cpt.pop('epoch',None)
+            cpt.pop('step',None)
+            # print(cpt.keys())
+            ### remap
+            # from collections import OrderedDict
+
+            # new_state_dict = OrderedDict()
+            
+            # for k, v in cpt.items():
+            #     # llm.model.xxx -> llm.model.model.xxx
+            #     # if k.startswith("llm.model.lm_head"):
+            #     #     logging.warning(f"Skipping missing key: {k}")
+            #     #     continue
+            #     if k.startswith("llm.model."):
+            #         k = k.replace("llm.model.", "llm.model.model.", 1)
+            #     # if k.endswith("lm_head.weight") or ".lm_head." in k:
+            #     #     continue
+            #     new_state_dict[k] = v
+            # print(new_state_dict)
+            self.llm.load_state_dict(cpt, strict=False)
             self.llm.to(self.device)
-            if self.fp16:
-                self.llm.half()
+            # if self.fp16:
+            #     self.llm.half()
             self.llm.eval()
 
-        self.flow.load_state_dict(torch.load(flow_model, map_location=self.device), strict=True)
+        cpt=torch.load(flow_model, map_location=self.device)
+        cpt.pop('epoch',None)
+        cpt.pop('step',None)
+        
+        self.flow.load_state_dict(cpt, strict=True)
         self.flow.to(self.device)
         if self.fp16:
             self.flow.half()
@@ -99,6 +123,12 @@ class FastCosyVoice3Model:
             k.replace('generator.', ''): v 
             for k, v in torch.load(hift_model, map_location=self.device).items()
         }
+        
+        #raw_sd = torch.load(hift_model, map_location=self.device, weights_only=True)
+        #hift_state_dict = {k.removeprefix("generator."): v for k, v in raw_sd.items()
+        #                if k.startswith("generator.")}
+
+
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
     
@@ -150,6 +180,7 @@ class FastCosyVoice3Model:
         prompt_text: torch.Tensor,
         llm_prompt_speech_token: torch.Tensor,
         llm_embedding: torch.Tensor,
+        LM_latents: torch.Tensor,
         tokens_list: list,
         llm_end_flag: dict,
         tokens_lock: threading.Lock
@@ -169,11 +200,13 @@ class FastCosyVoice3Model:
         prompt_speech_token_gpu = llm_prompt_speech_token.to(self.device)
         prompt_speech_token_len_gpu = torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32, device=self.device)
         embedding_gpu = llm_embedding.to(self.device)
-        
+        LM_latents_gpu = LM_latents.to(self.device)
+        # print(LM_latents_gpu.shape)
         try:
             llm_context = torch.cuda.stream(self.llm_stream) if self.llm_stream else nullcontext()
             
-            with llm_context, torch.inference_mode(), torch.amp.autocast('cuda', enabled=self.fp16):
+            # with llm_context, torch.inference_mode(), torch.amp.autocast('cuda',enabled=self.fp16):
+            with llm_context, torch.inference_mode():
                 for token in self.llm.inference(
                     text=text_gpu,
                     text_len=text_len_gpu,
@@ -182,6 +215,7 @@ class FastCosyVoice3Model:
                     prompt_speech_token=prompt_speech_token_gpu,
                     prompt_speech_token_len=prompt_speech_token_len_gpu,
                     embedding=embedding_gpu,
+                    LM_latents=LM_latents_gpu
                 ):
                     with tokens_lock:
                         tokens_list.append(token)
@@ -253,17 +287,26 @@ class FastCosyVoice3Model:
                         token_len_gpu = torch.tensor([batch_tokens.shape[1]], dtype=torch.int32, device=self.device)
                         
                         flow_start = time.time()
-                        tts_mel, _ = self.flow.inference(
-                            token=batch_tokens,
-                            token_len=token_len_gpu,
-                            prompt_token=flow_prompt_token_gpu,
-                            prompt_token_len=flow_prompt_token_len_gpu,
-                            prompt_feat=prompt_feat_gpu,
-                            prompt_feat_len=prompt_feat_len_gpu,
-                            embedding=flow_embedding_gpu,
-                            streaming=True,
-                            finalize=False
-                        )
+                        with torch.amp.autocast('cuda',enabled=self.fp16):
+                        # with torch.amp.autocast('cuda',dtype=torch.bfloat16,enabled=self.fp16):
+                            tts_mel, _ = self.flow.inference(
+                                token=batch_tokens,
+                                token_len=token_len_gpu,
+                                prompt_token=flow_prompt_token_gpu,
+                                prompt_token_len=flow_prompt_token_len_gpu,
+                                prompt_feat=prompt_feat_gpu,
+                                prompt_feat_len=prompt_feat_len_gpu,
+                                embedding=flow_embedding_gpu,
+                                streaming=True,
+                                finalize=False
+                            )
+                            
+                        # flow_prompt_token_gpu = torch.zeros(1, 0, dtype=torch.int32, device=self.device)
+                        # prompt_feat_gpu = torch.zeros(1, 0, 80, device=self.device)
+                        # flow_prompt_token_len_gpu = torch.tensor([0], dtype=torch.int32, device=self.device)
+                        # prompt_feat_len_gpu = torch.tensor([0], dtype=torch.int32, device=self.device)
+                            
+                        
                         flow_elapsed = time.time() - flow_start
                         total_flow_time += flow_elapsed
                         flow_call_count += 1
@@ -310,17 +353,18 @@ class FastCosyVoice3Model:
                     final_token_len = torch.tensor([final_tokens_gpu.shape[1]], dtype=torch.int32, device=self.device)
                     
                     flow_start = time.time()
-                    tts_mel, _ = self.flow.inference(
-                        token=final_tokens_gpu,
-                        token_len=final_token_len,
-                        prompt_token=flow_prompt_token_gpu,
-                        prompt_token_len=flow_prompt_token_len_gpu,
-                        prompt_feat=prompt_feat_gpu,
-                        prompt_feat_len=prompt_feat_len_gpu,
-                        embedding=flow_embedding_gpu,
-                        streaming=True,
-                        finalize=True
-                    )
+                    with torch.amp.autocast('cuda',enabled=self.fp16):
+                        tts_mel, _ = self.flow.inference(
+                            token=final_tokens_gpu,
+                            token_len=final_token_len,
+                            prompt_token=flow_prompt_token_gpu,
+                            prompt_token_len=flow_prompt_token_len_gpu,
+                            prompt_feat=prompt_feat_gpu,
+                            prompt_feat_len=prompt_feat_len_gpu,
+                            embedding=flow_embedding_gpu,
+                            streaming=True,
+                            finalize=True
+                        )
                     flow_elapsed = time.time() - flow_start
                     total_flow_time += flow_elapsed
                     flow_call_count += 1
@@ -373,6 +417,7 @@ class FastCosyVoice3Model:
         llm_prompt_speech_token: torch.Tensor = torch.zeros(1, 0, dtype=torch.int32),
         flow_prompt_speech_token: torch.Tensor = torch.zeros(1, 0, dtype=torch.int32),
         prompt_speech_feat: torch.Tensor = torch.zeros(1, 0, 80),
+        LM_latents: torch.Tensor = torch.zeros(1, 0, 2048),
         **kwargs
     ) -> Generator[Dict[str, torch.Tensor], None, None]:
         """
@@ -405,11 +450,10 @@ class FastCosyVoice3Model:
         prompt_feat_gpu = prompt_speech_feat.to(self.device, dtype=dtype)
         prompt_feat_len_gpu = torch.tensor([prompt_speech_feat.shape[1]], dtype=torch.int32).to(self.device)
         flow_embedding_gpu = flow_embedding.to(self.device, dtype=dtype)
-        
         # Start LLM thread
         llm_thread = threading.Thread(
             target=self._llm_job,
-            args=(text, prompt_text, llm_prompt_speech_token, llm_embedding, 
+            args=(text, prompt_text, llm_prompt_speech_token, llm_embedding, LM_latents,
                   tokens, llm_end_flag, tokens_lock),
             daemon=True
         )

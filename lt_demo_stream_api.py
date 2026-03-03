@@ -57,8 +57,8 @@ REFERENCE_AUDIO = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/oneyoun
 INSTRUCTION = "You are a helpful assistant."
 
 # TensorRT settings
-USE_TRT_FLOW = True       # TensorRT for Flow decoder (~2.5x speedup)
-USE_TRT_LLM = True        # TensorRT-LLM for LLM (~3x speedup)
+USE_TRT_FLOW = False       # TensorRT for Flow decoder (~2.5x speedup)
+USE_TRT_LLM = False        # TensorRT-LLM for LLM (~3x speedup)
 TRT_LLM_DTYPE = 'float16'  # bfloat16/float16/float32
 # Max tokens in KV-cache. 8192 tokens ≈ 100MB for Qwen2-0.5B.
 # Minimum needed: max_input_len + max_output_len = 512 + 2048 = 2560 tokens.
@@ -252,6 +252,124 @@ def synthesize_streaming_basic(
         speech = model_output['tts_speech']
         yield speech
 
+def Custom_cap_function_fast(custon_json):
+    # === Unpack input ===
+    # age_val = int(custon_json['age'])
+    genders = custon_json['gender']
+    spoken_style = custon_json['spoken_style']
+    emotion_style = custon_json['emotion_style']
+
+    emotion = custon_json['emotion']
+    intensity = custon_json['intensity']
+    intensity_array=['','"약하게"','"중간정도의"','"강하게"']
+    #speed = custon_json['pace']
+
+    # if age
+    if genders == "MALE":
+        gender = '"남성"의 목소리로'
+    elif genders == "FEMALE":
+        gender = '"여성"의 목소리로'
+    else: ### will be fix (단로로운 -> 단조로운)
+        gender = ''
+    if emotion_style:
+        if spoken_style:
+            if emotion=='무감정':
+                emotion='"중립적인" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='기쁨':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+intensity_array[intensity]+ ' "기쁜" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='슬픔':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+intensity_array[intensity]+' "슬픈" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='분노':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+intensity_array[intensity]+' "분노하는" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='당황':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+intensity_array[intensity]+' "당황하는" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='불안':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+intensity_array[intensity]+' "불안한" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='상처':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+intensity_array[intensity]+' "상처받은" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+        else:
+            if emotion=='무감정':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+'"중립적인" 감정'
+            elif emotion=='기쁨':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+'"기쁜" 감정'
+            elif emotion=='슬픔':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+'"슬픈" 감정'
+            elif emotion=='분노':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+'"분노하는" 감정'
+            elif emotion=='당황':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+'"당황하는" 감정'
+            elif emotion=='불안':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+'"불안한" 감정'
+            elif emotion=='상처':
+                emotion='"' + emotion_style + '"'+' 느낌의 '+'"상처받은" 감정'
+    else:
+        if intensity_array:
+            if emotion=='무감정':
+                emotion='"중립적인" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='기쁨':
+                emotion=intensity_array[intensity]+ ' "기쁜" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='슬픔':
+                emotion=intensity_array[intensity]+' "슬픈" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='분노':
+                emotion=intensity_array[intensity]+' "분노하는" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='당황':
+                emotion=intensity_array[intensity]+' "당황하는" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='불안':
+                emotion=intensity_array[intensity]+' "불안한" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='상처':
+                emotion=intensity_array[intensity]+' "상처받은" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+        else:
+            if emotion=='무감정':
+                emotion='"중립적인" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='기쁨':
+                emotion='"기쁜" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='슬픔':
+                emotion='"슬픈" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='분노':
+                emotion='"분노하는" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='당황':
+                emotion='"당황하는" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='불안':
+                emotion='"불안한" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+            elif emotion=='상처':
+                emotion='"상처받은" 감정이고 '+'"'+spoken_style+'"'+' 스타일'
+
+    parts = []
+
+    if emotion: parts.append(emotion)
+
+    caption=' '.join(parts)
+    # === Final composition ===
+
+    caption=emotion+'<|endofprompt|>'
+    # === Final composition ===
+    return caption
+
+def synthesize_streaming_kayden(
+    cosyvoice: FastCosyVoice3,
+    text: str,
+    prompt_text: str,
+    spk_id: str,
+    sample_rate: int,
+):
+    chunk_count = 0
+
+    caption={'age':30, 'gender':'FEMALE', 'spoken_style':'독백체', 'emotion_style':'자신하는', 'emotion':'기쁨', 'intensity':3}
+    caption=Custom_cap_function_fast(caption)
+
+    infer_ctx = torch.inference_mode() if USE_INFERENCE_MODE else torch.no_grad()
+    with infer_ctx:
+        for pcm_bytes in cosyvoice.inference_zero_shot_stream(
+            tts_text=text,
+            prompt_text=prompt_text,
+            prompt_wav=REFERENCE_AUDIO,
+            zero_shot_spk_id=spk_id,
+            caption=caption,
+        ):
+            chunk_count += 1
+
+            yield pcm_bytes
+
 
 
 def load_model():
@@ -315,14 +433,14 @@ def load_model():
     print("   - Hift: PyTorch (f0_predictor on CPU)")
     
     # Apply torch.compile to LLM only if TRT-LLM is not used
-    if not (USE_TRT_LLM and cosyvoice.trt_llm_loaded):
-        print("\n⚡ Applying torch.compile to LLM...")
-        compile_start = time.time()
-        apply_torch_compile(cosyvoice)
-        compile_time = time.time() - compile_start
-        print(f"✅ torch.compile applied in {compile_time:.3f} sec")
-    else:
-        print("\n⚡ torch.compile skipped (using TensorRT-LLM)")
+    #if not (USE_TRT_LLM and cosyvoice.trt_llm_loaded):
+    #    print("\n⚡ Applying torch.compile to LLM...")
+    #    compile_start = time.time()
+    #    apply_torch_compile(cosyvoice)
+    #    compile_time = time.time() - compile_start
+    #    print(f"✅ torch.compile applied in {compile_time:.3f} sec")
+    #else:
+    #    print("\n⚡ torch.compile skipped (using TensorRT-LLM)")
     
     # Prepare speaker embeddings (once)
     print("\n🎯 Preparing speaker embeddings...")
@@ -333,24 +451,24 @@ def load_model():
     print(f"✅ Embeddings prepared in {embed_time:.3f} sec")
     
     # Model warmup
-    if USE_TRT_LLM and cosyvoice.trt_llm_loaded:
-        # With TRT-LLM warmup is shorter - only Flow and Hift
-        print("\n🔥 Warming up model (TRT-LLM doesn't require long warmup)...")
-        for _ in cosyvoice.inference_zero_shot_stream(
-            tts_text="Short model warmup.",
-            prompt_text=prompt_text,
-            prompt_wav=REFERENCE_AUDIO,
-            zero_shot_spk_id=spk_id,
-        ):
-            pass
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        print("✅ Model warmed up")
-    else:
-        # Without TRT-LLM full warmup is needed for torch.compile
-        print("\n🔥 Warming up model (compiling graphs for different text lengths)...")
-        warmup_model(cosyvoice, prompt_text, spk_id)
-        print("✅ Model warmed up and ready")
+    #if USE_TRT_LLM and cosyvoice.trt_llm_loaded:
+    #    # With TRT-LLM warmup is shorter - only Flow and Hift
+    #    print("\n🔥 Warming up model (TRT-LLM doesn't require long warmup)...")
+    #    for _ in cosyvoice.inference_zero_shot_stream(
+    #        tts_text="Short model warmup.",
+    #        prompt_text=prompt_text,
+    #        prompt_wav=REFERENCE_AUDIO,
+    #        zero_shot_spk_id=spk_id,
+    #    ):
+    #        pass
+    #    if torch.cuda.is_available():
+    #        torch.cuda.synchronize()
+    #    print("✅ Model warmed up")
+    #else:
+    #    # Without TRT-LLM full warmup is needed for torch.compile
+    #    print("\n🔥 Warming up model (compiling graphs for different text lengths)...")
+    #    warmup_model(cosyvoice, prompt_text, spk_id)
+    #    print("✅ Model warmed up and ready")
 
     return cosyvoice, prompt_text, spk_id, sample_rate
 
