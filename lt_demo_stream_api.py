@@ -44,13 +44,13 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 # Model directory
-MODEL_DIR = 'pretrained_models/Fun-CosyVoice3-0.5B'
+MODEL_DIR = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/Fun-CosyVoice3-0.5B'
 
 # Reference audio file (3-10 sec, clean recording)
-REFERENCE_AUDIO = 'refs/oneyoung_ref/oneyoung.wav'
+REFERENCE_AUDIO = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/oneyoung_ref/oneyoung.wav'
 
 # Output directory
-OUTPUT_DIR = 'output/demo'
+#OUTPUT_DIR = 'output/demo'
 
 # Instruction for the model
 INSTRUCTION = "You are a helpful assistant."
@@ -218,7 +218,7 @@ def load_model():
         return
     
     # Create output directory
-    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    #Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     
     # Load prompt_text from txt file next to audio
     prompt_text = load_prompt_text(REFERENCE_AUDIO, INSTRUCTION)

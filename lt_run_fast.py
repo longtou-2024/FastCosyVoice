@@ -44,14 +44,14 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 # Model directory
-MODEL_DIR = 'pretrained_models/Fun-CosyVoice3-0.5B'
+#MODEL_DIR = 'pretrained_models/Fun-CosyVoice3-0.5B'
+MODEL_DIR = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/Fun-CosyVoice3-0.5B'
 
 # Reference audio file (3-10 sec, clean recording)
-#REFERENCE_AUDIO = 'refs/audio.wav'
-REFERENCE_AUDIO = 'refs/oneyoung_ref/oneyoung.wav'
+REFERENCE_AUDIO = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/oneyoung_ref/oneyoung.wav'
 
 # Output directory
-OUTPUT_DIR = 'output/run_fast'
+OUTPUT_DIR = 'output/lt_run_fast'
 
 # Instruction for the model
 INSTRUCTION = "You are a helpful assistant."
@@ -77,6 +77,36 @@ SYNTHESIS_TEXTS = [
     "안녕하세요 카카오 엔터테인먼트 크루 여러분~",
     "아니 왜 하필 나한테 돌진한 거냐고!",
     "짐승도 암살에 쓰나?",
+]
+
+SYNTHESIS_TEXTS = [
+"""
+Hi there! I’m AI DJ Honeydew, here to fill your ears with sweetness. What would you like to listen to today?
+How are you feeling right now? Just give me a single word, and I’ll pick the perfect tracks for your mood.
+It’s 3 PM—that time of day when you start feeling a bit sleepy, right? I’ve brought some high-energy dance tracks to wake you right up!
+It’s raining outside. How about a 'glass' of smooth jazz for a day like this? Check out recommendations one through three.
+Please pick your favorite among these three songs. I’m dying to know what you’ll choose!
+This is a massive hit that topped the Melon charts. It’ll grab your ears from the very first note.
+You’ve worked so hard today. I’ll play some cozy Lo-fi tracks that are just perfect for 11 PM.
+I’ve put together some beat-heavy tracks for your workout. Ready to get your heart rate up?
+If that last song wasn't quite your vibe, I have other recommendations ready, so just let me know anytime.
+Did you enjoy your music time with Honeydew? Let’s meet again tomorrow at this time with even better tunes.
+"""
+]
+
+SYNTHESIS_TEXTS = [
+"""
+很高兴见到你！我是为您带来甜美旋律的 AI DJ 哈妮露。今天想听什么歌呢？
+您现在心情怎么样？只要告诉我一个词，我就会为您准备最完美的歌单
+下午三点，是不是有点困了？我准备了一些动感的舞曲，帮您瞬间提神！
+窗外下着雨呢。这样的日子，来一杯宁静的爵士乐怎么样？请确认一下推荐列表的前三首。
+请在准备好的三首歌中选出您最喜欢的一首。我真的很期待您的选择。
+这首歌曾获得 Melon 排行榜第一名。从第一句开始就会抓住您的耳朵。
+今天一天辛苦了。为您播放适合深夜十一点的温馨 Lo-fi 音乐。
+我收集了一些适合运动时听的律动音乐。准备好提高心率了吗？
+如果刚才那首歌不合心意，我还准备了其他风格的曲目，请随时告诉我。
+和哈妮露一起的音乐时光愉快吗？明天同一时间，我们带着更好的音乐再见吧。
+"""
 ]
 
 
