@@ -47,7 +47,9 @@ def load_wav(wav, target_sr, min_sr=16000):
     if sample_rate != target_sr:
         assert sample_rate >= min_sr, 'wav sample rate {} must be greater than {}'.format(sample_rate, target_sr)
         speech = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sr)(speech)
-    return speech
+    #return speech
+    # NOTE(longtou)
+    return speech * 0.7
 
 
 @torch.no_grad()

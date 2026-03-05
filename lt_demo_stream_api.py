@@ -50,6 +50,20 @@ MODEL_DIR = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/Fun-CosyVoice
 # Reference audio file (3-10 sec, clean recording)
 REFERENCE_AUDIO = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/oneyoung_ref/oneyoung.wav'
 
+# NOTE(longtou):
+SPEAKER_PATHS = [
+    '/home/longtou.2024/mount/sample_audio/원영_가이드.wav',
+    '/home/longtou.2024/mount/sample_audio/킬링보이스_아이유_edit_short2.wav',
+    '/home/longtou.2024/mount/sample_audio/kast_emo/oneyoung.wav',
+    '/home/longtou.2024/mount/sample_audio/kast_emo/byeongheon.wav',
+]
+TEXT_PROMPTS=[
+    "어? 재본 적이 없는데? 둘다 너무너무 탐이나는데 어머.. 러블리 히히~, 장원영의 칠초 인터뷰 시작하겠습니다.",
+    "안녕하세요~. 킬링보이스에서 저를 찾으신다고 들어서 오늘 이렇게 조금.",
+    "장원영의 칠초 인터뷰 시작하겠습니다.",
+    "나는 정말 동엽이랑 워낙 친한 친구 사이니까.",
+]
+
 # Output directory
 #OUTPUT_DIR = 'output/demo'
 
@@ -348,22 +362,20 @@ def Custom_cap_function_fast(custon_json):
 def synthesize_streaming_kayden(
     cosyvoice: FastCosyVoice3,
     text: str,
-    prompt_text: str,
-    spk_id: str,
-    sample_rate: int,
+    spk_id: int,
 ):
     chunk_count = 0
 
-    caption={'age':30, 'gender':'FEMALE', 'spoken_style':'독백체', 'emotion_style':'자신하는', 'emotion':'기쁨', 'intensity':3}
+    caption={'age':30, 'gender':'FEMALE', 'spoken_style':'독백체', 'emotion_style':'', 'emotion':'기쁨', 'intensity':1}
     caption=Custom_cap_function_fast(caption)
 
     infer_ctx = torch.inference_mode() if USE_INFERENCE_MODE else torch.no_grad()
     with infer_ctx:
         for pcm_bytes in cosyvoice.inference_zero_shot_stream(
             tts_text=text,
-            prompt_text=prompt_text,
-            prompt_wav=REFERENCE_AUDIO,
-            zero_shot_spk_id=spk_id,
+            prompt_text=TEXT_PROMPTS[spk_id],
+            prompt_wav=SPEAKER_PATHS[spk_id],
+            zero_shot_spk_id='',
             caption=caption,
         ):
             chunk_count += 1

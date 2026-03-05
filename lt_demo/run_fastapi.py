@@ -1,4 +1,5 @@
 # uvicorn lt_demo.main:app --host 0.0.0.0 --port 8000
+# uvicorn lt_demo.run_fastapi:app --host 0.0.0.0 --port 8000
 import os
 os.environ["TRITON_LOG_LEVEL"] = "ERROR"
 import sys
@@ -14,9 +15,9 @@ from queue import Queue
 from threading import Thread
 import logging
 
-from lt_demo_stream_api import load_model, synthesize_streaming
-from lt_demo_stream_api import load_model_basic, synthesize_streaming_basic
-from lt_demo_stream_api import synthesize_streaming_kayden
+#from lt_demo_stream_api import load_model, synthesize_streaming
+#from lt_demo_stream_api import load_model_basic, synthesize_streaming_basic
+from lt_demo_stream_api import load_model, synthesize_streaming_kayden
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -45,9 +46,7 @@ async def generate_audio_stream(request: SynthesizeRequest):
     """오디오 청크를 스트리밍하는 비동기 제너레이터 - 생성되는 대로 바로 반환"""
     kwargs = {
         "text": request.tts_text,
-        "prompt_text": "장원영의 칠초 인터뷰 시작하겠습니다~",
-        "spk_id": '',
-        "sample_rate": 24000,
+        "spk_id": int(request.prompt_idx),
     }
     
     # 큐를 사용하여 별도 스레드에서 생성된 청크를 받기

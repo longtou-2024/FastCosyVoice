@@ -114,7 +114,9 @@ class ConditionalCFM(BASECFM):
                 streaming
             )
             dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
-            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
+            # NOTE(longtou)
+            #dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
+            dphi_dt = ((1.0 + 0.5) * dphi_dt - 0.5 * cfg_dphi_dt)
             x = x + dt * dphi_dt
             t = t + dt
             sol.append(x)
@@ -211,7 +213,9 @@ class CausalConditionalCFM(ConditionalCFM):
     def __init__(self, in_channels, cfm_params, n_spks=1, spk_emb_dim=64, estimator: torch.nn.Module = None):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
         set_all_random_seed(0)
-        self.rand_noise = torch.randn([1, 80, 50 * 300])
+        #self.rand_noise = torch.randn([1, 80, 50 * 300])
+        # NOTE(longtou)
+        self.rand_noise = torch.randn([1, 80, 50 * 300]) * 0.9
 
     @torch.inference_mode()
     def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, streaming=False):
