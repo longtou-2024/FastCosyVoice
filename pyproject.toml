@@ -35,6 +35,8 @@ dependencies = [
     "wetext>=0.1.2",
     "wget>=3.2",
     "x-transformers>=2.11.24",
+    "fastapi>=0.115.4",
+    "uvicorn>=0.40.0",
 ]
 
 [tool.hatch.build.targets.wheel]
