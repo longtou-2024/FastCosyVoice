@@ -1,0 +1,16 @@
+model:
+  model_dir: data/models/Fun-CosyVoice3-0.5B
+  llm_checkpoint: data/checkpoints/ave_llm.pt
+  flow_checkpoint: data/checkpoints/ave_flow.pt
+  hift_checkpoint: data/checkpoints/hift.pt
+  qwen3_dir: data/checkpoints/Qwen3-1.7B
+
+speakers:
+  - name: 장원영_가이드
+    audio: data/speakers/oneyoung/oneyoung_guide.wav
+  - name: 아이유
+    audio: data/speakers/iu/killing_voice_iu_edit_short2.wav
+  - name: 장원영
+    audio: data/speakers/oneyoung/oneyoung.wav
+  - name: 이병헌
+    audio: data/speakers/byeongheon/byeongheon.wav
