@@ -4,6 +4,8 @@ import sys
 import time
 import os
 import logging
+from pathlib import Path
+import yaml
 sys.path.append('third_party/Matcha-TTS')
 
 import torch
@@ -25,28 +27,30 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION (from config.yaml)
 # ============================================================================
 
-# Model directory
-MODEL_DIR = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/Fun-CosyVoice3-0.5B'
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH = PROJECT_ROOT / 'config.yaml'
 
-# Reference audio file (3-10 sec, clean recording)
-REFERENCE_AUDIO = '/home/longtou.2024/mount/longtou/saved/fast_cosyvoice/oneyoung_ref/oneyoung.wav'
+with open(CONFIG_PATH, 'r', encoding='utf-8') as _f:
+    _config = yaml.safe_load(_f)
 
-# NOTE(longtou):
-SPEAKER_PATHS = [
-    '/home/longtou.2024/mount/sample_audio/원영_가이드.wav',
-    '/home/longtou.2024/mount/sample_audio/킬링보이스_아이유_edit_short2.wav',
-    '/home/longtou.2024/mount/sample_audio/kast_emo/oneyoung.wav',
-    '/home/longtou.2024/mount/sample_audio/kast_emo/byeongheon.wav',
-]
-TEXT_PROMPTS=[
-    "어? 재본 적이 없는데? 둘다 너무너무 탐이나는데 어머.. 러블리 히히~, 장원영의 칠초 인터뷰 시작하겠습니다.",
-    "안녕하세요~. 킬링보이스에서 저를 찾으신다고 들어서 오늘 이렇게 조금.",
-    "장원영의 칠초 인터뷰 시작하겠습니다.",
-    "나는 정말 동엽이랑 워낙 친한 친구 사이니까.",
-]
+MODEL_DIR = str(PROJECT_ROOT / _config['model']['model_dir'])
+LLM_PT_PATH = str(PROJECT_ROOT / _config['model']['llm_checkpoint'])
+FLOW_PT_PATH = str(PROJECT_ROOT / _config['model']['flow_checkpoint'])
+HIFT_PT_PATH = str(PROJECT_ROOT / _config['model']['hift_checkpoint'])
+QWEN3_DIR = str(PROJECT_ROOT / _config['model']['qwen3_dir'])
+
+SPEAKER_PATHS = [str(PROJECT_ROOT / s['audio']) for s in _config['speakers']]
+
+def _load_txt_for_audio(audio_path: str) -> str:
+    """Read the .txt file next to an audio file (same name, .txt extension)."""
+    txt_path = audio_path.rsplit('.', 1)[0] + '.txt'
+    with open(txt_path, 'r', encoding='utf-8') as f:
+        return f.read().strip()
+
+TEXT_PROMPTS = [_load_txt_for_audio(p) for p in SPEAKER_PATHS]
 
 # Instruction for the model
 INSTRUCTION = "You are a helpful assistant."
@@ -61,13 +65,6 @@ TRT_LLM_KV_CACHE_TOKENS = 8192
 
 # Inference wrapper without autograd (reduces allocations and graph leak risk)
 USE_INFERENCE_MODE = True
-
-# Texts for synthesis
-SYNTHESIS_TEXTS = [
-    "안녕하세요 카카오 엔터테인먼트 크루 여러분~",
-    "아니 왜 하필 나한테 돌진한 거냐고!",
-    "짐승도 암살에 쓰나?",
-]
 
 
 def load_prompt_text(audio_path: str, instruction: str = INSTRUCTION) -> str:
@@ -125,10 +122,14 @@ def load_model():
     cosyvoice = FastCosyVoice3(
         model_dir=MODEL_DIR,
         fp16=True,
-        load_trt=USE_TRT_FLOW,       # TensorRT for Flow decoder (~2.5x speedup)
-        load_trt_llm=USE_TRT_LLM,    # TensorRT-LLM for LLM (~3x speedup)
+        load_trt=USE_TRT_FLOW,
+        load_trt_llm=USE_TRT_LLM,
         trt_llm_dtype=TRT_LLM_DTYPE,
         trt_llm_kv_cache_tokens=TRT_LLM_KV_CACHE_TOKENS,
+        llm_pt_path=LLM_PT_PATH,
+        flow_pt_path=FLOW_PT_PATH,
+        hift_pt_path=HIFT_PT_PATH,
+        qwen3_dir=QWEN3_DIR,
     )
 
     load_time = time.time() - load_start
@@ -171,4 +172,3 @@ if __name__ == '__main__':
         chunk_cnt += 1
         print(f"청크 #{chunk_cnt}: {len(audio_bytes)} bytes")
     print("Done")
-

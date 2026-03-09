@@ -95,6 +95,10 @@ class FastCosyVoice3:
         trt_llm_max_batch_size: int = 1,
         trt_llm_kv_cache_tokens: int = 8192,
         flow_n_timesteps: int = 10,
+        llm_pt_path: str = None,
+        flow_pt_path: str = None,
+        hift_pt_path: str = None,
+        qwen3_dir: str = None,
     ):
         """
         Initialize FastCosyVoice3 with parallel pipeline.
@@ -109,6 +113,10 @@ class FastCosyVoice3:
             trt_llm_max_batch_size: Max batch size for TRT-LLM engine
             trt_llm_kv_cache_tokens: Max tokens in KV cache (~100MB default, ~12KB/token)
             flow_n_timesteps: Number of diffusion steps for Flow (10=best quality, 5-6=faster)
+            llm_pt_path: Path to LLM checkpoint (default: model_dir/llm.pt)
+            flow_pt_path: Path to Flow checkpoint (default: model_dir/flow.pt)
+            hift_pt_path: Path to HiFT checkpoint (default: model_dir/hift.pt)
+            qwen3_dir: Path to Qwen3 model directory (default: None, uses built-in path)
         """
         self.model_dir = model_dir
         self.fp16 = fp16
@@ -145,7 +153,8 @@ class FastCosyVoice3:
             os.path.join(model_dir, 'campplus.onnx'),
             os.path.join(model_dir, 'speech_tokenizer_v3.onnx'),
             os.path.join(model_dir, 'spk2info.pt'),
-            configs['allowed_special']
+            configs['allowed_special'],
+            qwen3_model_dir=qwen3_dir,
         )
         
         self.sample_rate = configs['sample_rate']  # 24000
@@ -170,13 +179,12 @@ class FastCosyVoice3:
             fp16
         )
 
-        # llm_pt_path = os.path.join(model_dir, 'llm.pt')
-        llm_pt_path = '/home/longtou.2024/projects/FastCosyVoice/kayden_ckpt/ave_llm.pt'
-        # llm_pt_path = '/home/kayden.k/FastCosyVoice/pretrained_models/llm/ave_llm.pt'
-        flow_pt_path = '/home/longtou.2024/projects/FastCosyVoice/kayden_ckpt/ave_flow.pt'
-        # flow_pt_path = os.path.join(model_dir, 'flow.pt')
-        # hift_pt_path = os.path.join(model_dir, 'hift.pt')
-        hift_pt_path = '/home/longtou.2024/projects/FastCosyVoice/kayden_ckpt/hift.pt'
+        if llm_pt_path is None:
+            llm_pt_path = os.path.join(model_dir, 'llm.pt')
+        if flow_pt_path is None:
+            flow_pt_path = os.path.join(model_dir, 'flow.pt')
+        if hift_pt_path is None:
+            hift_pt_path = os.path.join(model_dir, 'hift.pt')
         # If TRT-LLM artifacts already exist, we can skip loading PyTorch LLM to GPU entirely.
         # This avoids a large, unnecessary VRAM allocation (TRT-LLM handles LLM inference).
         # NOTE: If artifacts are missing, _load_trt_llm may need PyTorch LLM weights to build hf_merged.
