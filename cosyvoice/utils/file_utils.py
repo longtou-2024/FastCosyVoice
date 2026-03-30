@@ -47,8 +47,7 @@ def load_wav(wav, target_sr, min_sr=16000):
     if sample_rate != target_sr:
         assert sample_rate >= min_sr, 'wav sample rate {} must be greater than {}'.format(sample_rate, target_sr)
         speech = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sr)(speech)
-    #return speech
-    # NOTE(longtou)
+    # speech=speech[:,:24000*5]
     return speech * 0.7
 
 
@@ -70,8 +69,8 @@ def export_flow_decoder_estimator_onnx(
     
     Key optimizations:
     - opset_version=20 (max for traditional export), 21 with dynamo=True
-    - Fixed batch_size=2 for CFG (Classifier-Free Guidance)
-    - Dynamic seq_len for streaming inference
+    - Dummy batch_size=2 for CFG (Classifier-Free Guidance) export example
+    - Dynamic batch and seq_len for streaming inference
     - Optional graph optimizations and FP16 conversion
     
     Args:
@@ -96,12 +95,12 @@ def export_flow_decoder_estimator_onnx(
     
     # Get out_channels from estimator
     out_channels = estimator_fp32.out_channels
-    # Fixed batch_size=2 for CFG (Classifier-Free Guidance)
+    # Use a representative dummy batch of 2 for export, but keep batch axis dynamic.
     batch_size = 2
     seq_len = seq_len_opt
     
     logging.info(f"Model out_channels: {out_channels}")
-    logging.info(f"Export batch_size: {batch_size} (fixed for CFG)")
+    logging.info(f"Export batch_size: {batch_size} (dummy, dynamic batch axis enabled)")
     logging.info(f"Export seq_len: {seq_len} (dynamic)")
     
     # Create dummy inputs in fp32 (ONNX export requires fp32)
@@ -112,13 +111,15 @@ def export_flow_decoder_estimator_onnx(
     spks = torch.rand((batch_size, out_channels), dtype=torch.float32, device=device)
     cond = torch.rand((batch_size, out_channels, seq_len), dtype=torch.float32, device=device)
     
-    # Dynamic axes - only seq_len varies, batch is fixed to 2 for CFG
+    # Dynamic axes - runtime batch corresponds to CFG-expanded batch (2 * sample_batch).
     dynamic_axes = {
-        'x': {2: 'seq_len'},
-        'mask': {2: 'seq_len'},
-        'mu': {2: 'seq_len'},
-        'cond': {2: 'seq_len'},
-        'estimator_out': {2: 'seq_len'},
+        'x': {0: 'cfg_batch', 2: 'seq_len'},
+        'mask': {0: 'cfg_batch', 2: 'seq_len'},
+        'mu': {0: 'cfg_batch', 2: 'seq_len'},
+        't': {0: 'cfg_batch'},
+        'spks': {0: 'cfg_batch'},
+        'cond': {0: 'cfg_batch', 2: 'seq_len'},
+        'estimator_out': {0: 'cfg_batch', 2: 'seq_len'},
     }
     
     # CRITICAL: For DiT models, the 'streaming' parameter affects attention mask!
@@ -139,7 +140,7 @@ def export_flow_decoder_estimator_onnx(
     wrapped_estimator = EstimatorWrapper(estimator_fp32, streaming)
     wrapped_estimator.eval()
     
-    # Traditional export (opset 20 max)
+    # Traditional export (opset 17 max supported by this torch version)
     actual_opset = min(opset_version, 20)
     logging.info(f"Using torch.onnx.export (opset {actual_opset})...")
     torch.onnx.export(
@@ -216,6 +217,115 @@ def export_flow_decoder_estimator_onnx(
         estimator.half()
     
     logging.info(f"Successfully exported ONNX to {onnx_path}")
+
+
+def export_cache_flow_decoder_onnx(
+    estimator: torch.nn.Module,
+    onnx_path: str,
+    device: torch.device,
+    flow_decoder_required_cache_size: int = 150,
+    flow_n_timesteps: int = 4,
+    opset_version: int = 18,
+):
+    """
+    Export cache-based CausalConditionalDecoder (UNet) to ONNX with dynamic batch.
+
+    Inputs: x, mask, mu, t, spks, cond + 7 cache tensors (conv/kv/final)
+    Outputs: estimator_out + 7 updated cache tensors
+    Dynamic axes: batch (dim 0 for x/mask/mu/t/spks/cond, dim 2 for caches),
+                  seq_len, cache_in_len
+    """
+    if os.path.exists(onnx_path) and os.path.getsize(onnx_path) > 0:
+        logging.info(f"Cache flow ONNX already exists: {onnx_path}")
+        return
+
+    logging.info(f"Exporting cache flow decoder to ONNX: {onnx_path}")
+
+    original_dtype = next(estimator.parameters()).dtype
+    estimator_fp32 = estimator.float()
+    estimator_fp32.eval()
+
+    # Redirect forward to forward_chunk for ONNX tracing
+    original_forward = estimator_fp32.forward
+    estimator_fp32.forward = estimator_fp32.forward_chunk
+
+    out_channels = estimator_fp32.out_channels
+    batch_size, seq_len = 2, 256
+    cs = flow_decoder_required_cache_size
+
+    # Dummy inputs
+    x = torch.rand((batch_size, out_channels, seq_len), dtype=torch.float32, device=device)
+    mask = torch.ones((batch_size, 1, seq_len), dtype=torch.float32, device=device)
+    mu = torch.rand((batch_size, out_channels, seq_len), dtype=torch.float32, device=device)
+    t = torch.rand((batch_size,), dtype=torch.float32, device=device)
+    spks = torch.rand((batch_size, out_channels), dtype=torch.float32, device=device)
+    cond = torch.rand((batch_size, out_channels, seq_len), dtype=torch.float32, device=device)
+
+    # Dummy caches (one timestep slice)
+    down_blocks_conv_cache = torch.zeros(1, batch_size, 832, 2, dtype=torch.float32, device=device)
+    down_blocks_kv_cache = torch.zeros(1, 4, batch_size, cs, 512, 2, dtype=torch.float32, device=device)
+    mid_blocks_conv_cache = torch.zeros(12, batch_size, 512, 2, dtype=torch.float32, device=device)
+    mid_blocks_kv_cache = torch.zeros(12, 4, batch_size, cs, 512, 2, dtype=torch.float32, device=device)
+    up_blocks_conv_cache = torch.zeros(1, batch_size, 1024, 2, dtype=torch.float32, device=device)
+    up_blocks_kv_cache = torch.zeros(1, 4, batch_size, cs, 512, 2, dtype=torch.float32, device=device)
+    final_blocks_conv_cache = torch.zeros(batch_size, 256, 2, dtype=torch.float32, device=device)
+
+    torch.onnx.export(
+        estimator_fp32,
+        (x, mask, mu, t, spks, cond,
+         down_blocks_conv_cache, down_blocks_kv_cache,
+         mid_blocks_conv_cache, mid_blocks_kv_cache,
+         up_blocks_conv_cache, up_blocks_kv_cache,
+         final_blocks_conv_cache),
+        onnx_path,
+        export_params=True,
+        opset_version=opset_version,
+        do_constant_folding=True,
+        input_names=[
+            'x', 'mask', 'mu', 't', 'spks', 'cond',
+            'down_blocks_conv_cache', 'down_blocks_kv_cache',
+            'mid_blocks_conv_cache', 'mid_blocks_kv_cache',
+            'up_blocks_conv_cache', 'up_blocks_kv_cache',
+            'final_blocks_conv_cache',
+        ],
+        output_names=[
+            'estimator_out',
+            'down_blocks_conv_cache_out', 'down_blocks_kv_cache_out',
+            'mid_blocks_conv_cache_out', 'mid_blocks_kv_cache_out',
+            'up_blocks_conv_cache_out', 'up_blocks_kv_cache_out',
+            'final_blocks_conv_cache_out',
+        ],
+        dynamic_axes={
+            'x': {0: 'batch', 2: 'seq_len'},
+            'mask': {0: 'batch', 2: 'seq_len'},
+            'mu': {0: 'batch', 2: 'seq_len'},
+            't': {0: 'batch'},
+            'spks': {0: 'batch'},
+            'cond': {0: 'batch', 2: 'seq_len'},
+            'estimator_out': {0: 'batch', 2: 'seq_len'},
+            'down_blocks_conv_cache': {1: 'batch'},
+            'mid_blocks_conv_cache': {1: 'batch'},
+            'up_blocks_conv_cache': {1: 'batch'},
+            'final_blocks_conv_cache': {0: 'batch'},
+            'down_blocks_kv_cache': {2: 'batch', 3: 'cache_in_len'},
+            'mid_blocks_kv_cache': {2: 'batch', 3: 'cache_in_len'},
+            'up_blocks_kv_cache': {2: 'batch', 3: 'cache_in_len'},
+            'down_blocks_conv_cache_out': {1: 'batch'},
+            'mid_blocks_conv_cache_out': {1: 'batch'},
+            'up_blocks_conv_cache_out': {1: 'batch'},
+            'final_blocks_conv_cache_out': {0: 'batch'},
+            'down_blocks_kv_cache_out': {2: 'batch', 3: 'cache_out_len'},
+            'mid_blocks_kv_cache_out': {2: 'batch', 3: 'cache_out_len'},
+            'up_blocks_kv_cache_out': {2: 'batch', 3: 'cache_out_len'},
+        },
+    )
+
+    # Restore
+    estimator_fp32.forward = original_forward
+    if original_dtype == torch.float16:
+        estimator.half()
+
+    logging.info(f"Successfully exported cache flow ONNX to {onnx_path}")
 
 
 def convert_onnx_to_trt(trt_model, trt_kwargs, onnx_model, fp16):

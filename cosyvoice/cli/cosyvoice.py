@@ -68,7 +68,7 @@ class CosyVoice:
 
     def add_zero_shot_spk(self, prompt_text, prompt_wav, zero_shot_spk_id):
         assert zero_shot_spk_id != '', 'do not use empty zero_shot_spk_id'
-        model_input = self.frontend.frontend_zero_shot('', prompt_text, prompt_wav, self.sample_rate, '')
+        model_input = self.frontend.frontend_zero_shot('', prompt_text, prompt_wav, self.sample_rate, '"자신하는" 느낌의 "약하게" "기쁜" 감정이고 "독백체" 스타일<|endofprompt|>')
         del model_input['text']
         del model_input['text_len']
         self.frontend.spk2info[zero_shot_spk_id] = model_input
@@ -210,7 +210,7 @@ class CosyVoice3(CosyVoice2):
             load_trt, fp16 = False, False
             logging.warning('no cuda device, set load_trt/fp16 to False')
         self.model = CosyVoice3Model(configs['llm'], configs['flow'], configs['hift'], fp16)
-        self.model.load('{}/llm.pt'.format(model_dir),
+        self.model.load('/home/kayden.k/FastCosyVoice/pretrained_models/epoch_0_step_105000.pt',
                         '{}/flow.pt'.format(model_dir),
                         '{}/hift.pt'.format(model_dir))
         if load_vllm:

@@ -38,14 +38,11 @@ class MaskedDiffWithXvec(torch.nn.Module):
                                        'cfm_params': DictConfig({'sigma_min': 1e-06, 'solver': 'euler', 't_scheduler': 'cosine',
                                                                  'training_cfg_rate': 0.2, 'inference_cfg_rate': 0.7, 'reg_loss_type': 'l1'}),
                                        'decoder_params': {'channels': [256, 256], 'dropout': 0.0, 'attention_head_dim': 64,
-                                                          'n_blocks': 4, 'num_mid_blocks': 12, 'num_heads': 8, 'act_fn': 'gelu'}},
-                 mel_feat_conf: Dict = {'n_fft': 1024, 'num_mels': 80, 'sampling_rate': 22050,
-                                        'hop_size': 256, 'win_size': 1024, 'fmin': 0, 'fmax': 8000}):
+                                                          'n_blocks': 4, 'num_mid_blocks': 12, 'num_heads': 8, 'act_fn': 'gelu'}}):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
         self.decoder_conf = decoder_conf
-        self.mel_feat_conf = mel_feat_conf
         self.vocab_size = vocab_size
         self.output_type = output_type
         self.input_frame_rate = input_frame_rate
@@ -109,7 +106,6 @@ class MaskedDiffWithXvec(torch.nn.Module):
                   prompt_token,
                   prompt_token_len,
                   prompt_feat,
-                  
                   prompt_feat_len,
                   embedding,
                   flow_cache):
@@ -149,18 +145,6 @@ class MaskedDiffWithXvec(torch.nn.Module):
         assert feat.shape[2] == mel_len2
         return feat.float(), flow_cache
 
-class BNS_sampling(torch.nn.Module):
-    def __init__(self,Nstep=3):
-        super().__init__()
-
-        self.Nstep=Nstep ### Nstep=3, total parameter= 13
-        self.t_weights = torch.nn.Parameter(torch.tensor([1/(self.Nstep),1/(self.Nstep),1/(self.Nstep)]))
-        self.a_weights = torch.nn.Parameter(torch.ones(self.Nstep))
-        self.b_weights = torch.nn.ParameterList()
-        for i in range(Nstep):
-            w=torch.zeros(i+1)
-            w[-1]=1/self.Nstep
-            self.b_weights.append(torch.nn.Parameter(w))
 
 class CausalMaskedDiffWithXvec(torch.nn.Module):
     def __init__(self,
@@ -179,14 +163,11 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
                                        'cfm_params': DictConfig({'sigma_min': 1e-06, 'solver': 'euler', 't_scheduler': 'cosine',
                                                                  'training_cfg_rate': 0.2, 'inference_cfg_rate': 0.7, 'reg_loss_type': 'l1'}),
                                        'decoder_params': {'channels': [256, 256], 'dropout': 0.0, 'attention_head_dim': 64,
-                                                          'n_blocks': 4, 'num_mid_blocks': 12, 'num_heads': 8, 'act_fn': 'gelu'}},
-                 mel_feat_conf: Dict = {'n_fft': 1024, 'num_mels': 80, 'sampling_rate': 22050,
-                                        'hop_size': 256, 'win_size': 1024, 'fmin': 0, 'fmax': 8000}):
+                                                          'n_blocks': 4, 'num_mid_blocks': 12, 'num_heads': 8, 'act_fn': 'gelu'}}):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
         self.decoder_conf = decoder_conf
-        self.mel_feat_conf = mel_feat_conf
         self.vocab_size = vocab_size
         self.output_type = output_type
         self.input_frame_rate = input_frame_rate
@@ -199,13 +180,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         self.only_mask_loss = only_mask_loss
         self.token_mel_ratio = token_mel_ratio
         self.pre_lookahead_len = pre_lookahead_len
-        self.BNS_sampling = BNS_sampling(Nstep=3)
-        set_all_random_seed(0)
-        self.rand_noise = torch.randn([1, 80, 50 * 300])*0.9
 
-        # torch.manual_seed(1986)  # or pass as parameter
-        # torch.cuda.manual_seed_all(1986)
-        # self.rand_noise = torch.randn([1, 80, 50 * 300])*0.9
     def forward(
             self,
             batch: dict,
@@ -233,7 +208,6 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         h = self.encoder_proj(h)
 
         # get conditions
-        # feat = F.interpolate(feat.unsqueeze(dim=1), size=h.shape[1:], mode="nearest").squeeze(dim=1)
         conds = torch.zeros(feat.shape, device=token.device)
         for i, j in enumerate(feat_len):
             if random.random() < 0.5:
@@ -254,109 +228,6 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         return {'loss': loss}
 
     @torch.inference_mode()
-    def inference_basic(self,
-                  token,
-                  token_len,
-                  prompt_token,
-                  prompt_token_len,
-                  prompt_feat,
-                  prompt_feat_len,
-                  embedding,
-                  cache,
-                  finalize, flow_step):
-        """
-        Cache-based streaming inference with batch support.
-        - Encoder: per-sample forward_chunk with KV cache (loop over B)
-        - Decoder: CacheCausalConditionalCFM with UNet cache (single batched forward pass)
-        """
-        B = token.shape[0]
-
-        # xvec projection
-        embedding = F.normalize(embedding, dim=1)
-        embedding = self.spk_embed_affine_layer(embedding)
-
-        # ── Encoder: per-sample with cache ──
-        h_list = []
-        mel_len1_list = []
-        mel_len2_list = []
-
-        for i in range(B):
-            pt_len = int(prompt_token_len[i].item())
-            tk_len = int(token_len[i].item())
-            tok_i = torch.concat([prompt_token[i:i+1, :pt_len], token[i:i+1, :tk_len]], dim=1)
-            tok_len_i = prompt_token_len[i:i+1] + token_len[i:i+1]
-            mask_i = (~make_pad_mask(tok_len_i)).unsqueeze(-1).to(embedding)
-            tok_emb_i = self.input_embedding(torch.clamp(tok_i, min=0)) * mask_i
-
-            enc_cache_i = cache['encoder_caches'][i]
-            if finalize:
-                h_i, h_lengths_i, enc_out = self.encoder.forward_chunk(tok_emb_i, tok_len_i, **enc_cache_i)
-            else:
-                tok_main = tok_emb_i[:, :-self.pre_lookahead_len]
-                tok_ctx = tok_emb_i[:, -self.pre_lookahead_len:]
-                h_i, h_lengths_i, enc_out = self.encoder.forward_chunk(tok_main, tok_len_i, context=tok_ctx, **enc_cache_i)
-
-            # update encoder cache
-            enc_cache_i['offset'] = enc_out[0]
-            enc_cache_i['pre_lookahead_layer_conv2_cache'] = enc_out[1]
-            enc_cache_i['encoders_kv_cache'] = enc_out[2]
-            enc_cache_i['upsample_offset'] = enc_out[3]
-            enc_cache_i['upsample_conv_cache'] = enc_out[4]
-            enc_cache_i['upsample_kv_cache'] = enc_out[5]
-
-            ml1 = prompt_feat[i].shape[0] if prompt_feat.dim() == 3 else prompt_feat.shape[1]
-            ml2 = h_i.shape[1] - ml1
-            h_i = self.encoder_proj(h_i)
-
-            h_list.append(h_i)
-            mel_len1_list.append(ml1)
-            mel_len2_list.append(ml2)
-
-        # ── Stack for batched decoder (pad to max length) ──
-        max_h_len = max(h.shape[1] for h in h_list)
-        for i in range(B):
-            if h_list[i].shape[1] < max_h_len:
-                h_list[i] = F.pad(h_list[i], (0, 0, 0, max_h_len - h_list[i].shape[1]))
-        h_batch = torch.cat(h_list, dim=0)  # (B, max_h_len, 80)
-        total_mel = h_batch.shape[1]
-
-        conds = torch.zeros([B, total_mel, self.output_size], device=h_batch.device, dtype=h_batch.dtype)
-        for i in range(B):
-            if mel_len1_list[i] > 0:
-                conds[i, :mel_len1_list[i]] = prompt_feat[i, :mel_len1_list[i]] if prompt_feat.dim() == 3 else prompt_feat[:, :mel_len1_list[i]]
-        conds = conds.transpose(1, 2)
-
-        mask = (~make_pad_mask(torch.tensor([total_mel] * B, device=h_batch.device))).to(h_batch)
-        # ── Decoder: batched cache-based CacheCausalConditionalCFM ──
-        h_t = h_batch.transpose(1, 2).contiguous()  # (B, 80, T)
-        feat, cache['decoder_cache'] = self.decoder(
-            mu=h_t,
-            mask=mask.unsqueeze(1),
-            spks=embedding,
-            cond=conds,
-            n_timesteps=flow_step,
-            cache=cache['decoder_cache'],
-        )
-
-        # Crop prompt region and trim to actual mel_len2 per-sample
-        feats = []
-        for i in range(B):
-            feats.append(feat[i:i+1, :, mel_len1_list[i]:mel_len1_list[i] + mel_len2_list[i]])
-
-        # Stack back to batch (pad shorter samples to max mel_len2)
-        max_ml2 = max(mel_len2_list)
-        if len(set(mel_len2_list)) == 1:
-            feat_out = torch.cat(feats, dim=0)
-        else:
-            padded = []
-            for f in feats:
-                if f.shape[2] < max_ml2:
-                    f = F.pad(f, (0, max_ml2 - f.shape[2]))
-                padded.append(f)
-            feat_out = torch.cat(padded, dim=0)
-
-        return feat_out.float(), cache, mel_len2_list
-
     def inference(self,
                   token,
                   token_len,
@@ -365,171 +236,44 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
                   prompt_feat,
                   prompt_feat_len,
                   embedding,
-                  cache,
-                  finalize, flow_step):
-        """
-        Cache-based streaming BNS inference with batch support.
-        - Encoder: per-sample forward_chunk with KV cache (loop over B)
-        - Decoder: BNS 3-step sampling with CFG doubling (2*B)
-        """
-        B = token.shape[0]
-
+                  streaming,
+                  finalize):
+        assert token.shape[0] == 1
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
 
-        # ── Encoder: per-sample with cache ──
-        h_list = []
-        mel_len1_list = []
-        mel_len2_list = []
+        # concat text and prompt_text
+        token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
+        mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
+        token = self.input_embedding(torch.clamp(token, min=0)) * mask
 
-        for i in range(B):
-            pt_len = int(prompt_token_len[i].item())
-            tk_len = int(token_len[i].item())
-            tok_i = torch.concat([prompt_token[i:i+1, :pt_len], token[i:i+1, :tk_len]], dim=1)
-            tok_len_i = prompt_token_len[i:i+1] + token_len[i:i+1]
-            mask_i = (~make_pad_mask(tok_len_i)).unsqueeze(-1).to(embedding)
-            tok_emb_i = self.input_embedding(torch.clamp(tok_i.long(), min=0)) * mask_i
-
-            enc_cache_i = cache['encoder_caches'][i]
-            if finalize:
-                h_i, h_lengths_i, enc_out = self.encoder.forward_chunk(tok_emb_i, tok_len_i, **enc_cache_i)
-            else:
-                tok_main = tok_emb_i[:, :-self.pre_lookahead_len]
-                tok_ctx = tok_emb_i[:, -self.pre_lookahead_len:]
-                h_i, h_lengths_i, enc_out = self.encoder.forward_chunk(tok_main, tok_len_i, context=tok_ctx, **enc_cache_i)
-
-            # update encoder cache
-            enc_cache_i['offset'] = enc_out[0]
-            enc_cache_i['pre_lookahead_layer_conv2_cache'] = enc_out[1]
-            enc_cache_i['encoders_kv_cache'] = enc_out[2]
-            enc_cache_i['upsample_offset'] = enc_out[3]
-            enc_cache_i['upsample_conv_cache'] = enc_out[4]
-            enc_cache_i['upsample_kv_cache'] = enc_out[5]
-
-            ml1 = prompt_feat[i].shape[0] if prompt_feat.dim() == 3 else prompt_feat.shape[1]
-            ml2 = h_i.shape[1] - ml1
-            h_i = self.encoder_proj(h_i)
-
-            h_list.append(h_i)
-            mel_len1_list.append(ml1)
-            mel_len2_list.append(ml2)
-
-        # ── Stack for batched BNS decoder (pad to max length) ──
-        max_h_len = max(h.shape[1] for h in h_list)
-        for i in range(B):
-            if h_list[i].shape[1] < max_h_len:
-                h_list[i] = F.pad(h_list[i], (0, 0, 0, max_h_len - h_list[i].shape[1]))
-        h_batch = torch.cat(h_list, dim=0)  # (B, max_h_len, D)
-        total_mel = h_batch.shape[1]
-
-        # get conditions (zeros, no prompt feat injected)
-        conds = torch.zeros([B, total_mel, self.output_size], device=h_batch.device, dtype=h_batch.dtype)
-
-        for i in range(B):
-            if mel_len1_list[i] > 0:
-                conds[i, :mel_len1_list[i]] = prompt_feat[i, :mel_len1_list[i]] if prompt_feat.dim() == 3 else prompt_feat[:, :mel_len1_list[i]]        
-
-        conds = conds.transpose(1, 2)  # (B, 80, total_mel)
-
-
-        
-        if finalize:
-            mask = (~make_pad_mask((token_len + prompt_token_len) * 2)).to(h_batch).unsqueeze(1)
+        # text encode
+        if finalize is True:
+            h, h_lengths = self.encoder(token, token_len, streaming=streaming)
         else:
-            mask = (~make_pad_mask((token_len + prompt_token_len - self.pre_lookahead_len) * 2)).to(h_batch).unsqueeze(1)       
-        # mask = (~make_pad_mask(torch.tensor([total_mel] * B, device=h_batch.device))).to(h_batch).unsqueeze(1)
-        # BNS time span
-        t_span = torch.cumsum(F.softmax(self.BNS_sampling.t_weights, dim=0), dim=0).to(h_batch.device)
-        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+            token, context = token[:, :-self.pre_lookahead_len], token[:, -self.pre_lookahead_len:]
+            h, h_lengths = self.encoder(token, token_len, context=context, streaming=streaming)
+        mel_len1, mel_len2 = prompt_feat.shape[1], h.shape[1] - prompt_feat.shape[1]
+        h = self.encoder_proj(h)
 
-        # Noise: shared across batch (same random seed), tile to B
-        offset = cache['decoder_cache'].pop('offset')
-        x = self.rand_noise[:, :, :total_mel + offset].to(h_batch.device).to(h_batch.dtype)
-        x = x[:, :, offset:]  # (1, 80, total_mel)
-        offset += total_mel
-        x = x.expand(B, -1, -1).contiguous()  # (B, 80, total_mel)
-        x0 = x.clone()
+        # get conditions
+        conds = torch.zeros([1, mel_len1 + mel_len2, self.output_size], device=token.device).to(h.dtype)
+        conds[:, :mel_len1] = prompt_feat
+        conds = conds.transpose(1, 2)
 
-        # Pre-allocate CFG-doubled buffers (first B = conditional, last B = unconditional)
-        B2 = 2 * B
-        T = total_mel
-        x_in = torch.zeros([B2, 80, T], device=x.device, dtype=x.dtype)
-        mask_in = torch.zeros([B2, 1, T], device=x.device, dtype=x.dtype)
-        mu_in = torch.zeros([B2, 80, T], device=x.device, dtype=x.dtype)
-        t_in = torch.zeros([B2], device=x.device, dtype=x.dtype)
-        spks_in = torch.zeros([B2, 80], device=x.device, dtype=x.dtype)
-        cond_in = torch.zeros([B2, 80, T], device=x.device, dtype=x.dtype)
-
-        h_t = h_batch.transpose(1, 2).contiguous()  # (B, 80, total_mel)
-        flow_cache_size = cache['decoder_cache']['down_blocks_kv_cache'].shape[4]
-
-        for step in range(3):
-            x_in[:B] = x
-            x_in[B:] = x
-            mask_in[:B] = mask
-            mask_in[B:] = mask
-            mu_in[:B] = h_t
-            # mu_in[B:] stays zero (unconditional)
-
-            spks_in[:B] = embedding
-            # spks_in[B:] stays zero
-            cond_in[:B] = conds
-            # cond_in[B:] stays zero
-
-            cache_step = {k: v[step] for k, v in cache['decoder_cache'].items()}
-
-            if step == 0:
-                time = torch.tensor([0.], device=x0.device, dtype=x0.dtype)
-            else:
-                time = t_span[step - 1].unsqueeze(0)
-            t_in[:] = time
-
-            dphi_dt, cache_step = self.decoder.forward_estimator(
-                x_in, mask_in, mu_in, t_in, spks_in, cond_in, cache=cache_step
-            )
-
-            if flow_cache_size != 0 and T >= flow_cache_size:
-                cache['decoder_cache']['down_blocks_conv_cache'][step] = cache_step[0]
-                cache['decoder_cache']['down_blocks_kv_cache'][step] = cache_step[1][:, :, :, -flow_cache_size:]
-                cache['decoder_cache']['mid_blocks_conv_cache'][step] = cache_step[2]
-                cache['decoder_cache']['mid_blocks_kv_cache'][step] = cache_step[3][:, :, :, -flow_cache_size:]
-                cache['decoder_cache']['up_blocks_conv_cache'][step] = cache_step[4]
-                cache['decoder_cache']['up_blocks_kv_cache'][step] = cache_step[5][:, :, :, -flow_cache_size:]
-                cache['decoder_cache']['final_blocks_conv_cache'][step] = cache_step[6]
-
-            # Split CFG: first B = conditional, last B = unconditional
-            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [B, B], dim=0)
-            dphi_dt = (1.0 + 0.5) * dphi_dt - 0.5 * cfg_dphi_dt
-
-            if step == 0:
-                U_cat = dphi_dt.unsqueeze(3)
-            else:
-                U_cat = torch.cat([U_cat, dphi_dt.unsqueeze(3)], dim=3)
-
-            b_weight = self.BNS_sampling.b_weights[step].unsqueeze(0).unsqueeze(0).unsqueeze(0)
-            a_weight = self.BNS_sampling.a_weights[step]
-            x = a_weight * x0 + torch.sum(b_weight * U_cat, 3)
-
-        # ── Crop prompt region and trim to actual mel_len2 per-sample ──
-        feats = []
-        for i in range(B):
-            feats.append(x[i:i+1, :, mel_len1_list[i]:mel_len1_list[i] + mel_len2_list[i]])
-
-        # Stack back to batch (pad shorter samples to max mel_len2)
-        max_ml2 = max(mel_len2_list)
-        if len(set(mel_len2_list)) == 1:
-            feat_out = torch.cat(feats, dim=0)
-        else:
-            padded = []
-            for f in feats:
-                if f.shape[2] < max_ml2:
-                    f = F.pad(f, (0, max_ml2 - f.shape[2]))
-                padded.append(f)
-            feat_out = torch.cat(padded, dim=0)
-
-        cache['decoder_cache']['offset'] = offset
-        return feat_out.float(), cache, mel_len2_list
+        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+        feat, _ = self.decoder(
+            mu=h.transpose(1, 2).contiguous(),
+            mask=mask.unsqueeze(1),
+            spks=embedding,
+            cond=conds,
+            n_timesteps=32,
+            streaming=streaming
+        )
+        feat = feat[:, :, mel_len1:]
+        assert feat.shape[2] == mel_len2
+        return feat.float(), None
 
 
 class BNS_sampling(torch.nn.Module):
@@ -584,9 +328,8 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
 
         self.BNS_sampling = BNS_sampling(Nstep=3)
         set_all_random_seed(0)
-        self.rand_noise = torch.randn([1, 80, 50 * 300]) * 0.7
-        self._t_span_cache = None
-        self._rand_noise_cache = None
+
+        self.rand_noise = torch.randn([1, 80, 50 * 300])
 
 
     def forward(
@@ -646,7 +389,7 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
                   embedding,
                   streaming,
                   finalize):
-        # assert token.shape[0] == 1
+        assert token.shape[0] == 1
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
@@ -662,55 +405,50 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         else:
             h = self.pre_lookahead_layer(token[:, :-self.pre_lookahead_len], context=token[:, -self.pre_lookahead_len:])
         h = h.repeat_interleave(self.token_mel_ratio, dim=1)
-        b=h.size(0)
-
         mel_len1, mel_len2 = prompt_feat.shape[1], h.shape[1] - prompt_feat.shape[1]
 
         # get conditions
-        conds = torch.zeros([h.size(0), h.size(1), self.output_size], device=token.device).to(h.dtype)
+        conds = torch.zeros([1, mel_len1 + mel_len2, self.output_size], device=token.device).to(h.dtype)
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
+
+        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+
+        t_span=torch.cumsum(F.softmax(self.BNS_sampling.t_weights,dim=0),dim=0).to(h.device)
+        # t_span=F.softmax(self.BNS_sampling.t_weights,dim=0)
+        # t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         
-        if finalize is True:
-            mask = (~make_pad_mask(token_len*2)).to(h)
-        else:
-            mask = (~make_pad_mask((token_len-self.pre_lookahead_len)*2)).to(h)
-        mask=mask.unsqueeze(1)
-        # t_span: cache since BNS weights don't change during inference
-        if self._t_span_cache is None:
-            with torch.no_grad():
-                t = torch.cumsum(F.softmax(self.BNS_sampling.t_weights, dim=0), dim=0)
-                t = 1 - torch.cos(t * 0.5 * torch.pi)
-                self._t_span_cache = t.detach().cpu()
-        t_span = self._t_span_cache.to(device=h.device, dtype=h.dtype)
+        ### change to cosine domain
+        # if self.t_scheduler == 'cosine':
+        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        x=self.rand_noise[:,:,:h.size(1)].to(h.device).to(h.dtype)
+        x0=x.clone()
+        x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
+        mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
+        spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
+        cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)        
+        h=h.transpose(1, 2).contiguous()
 
-        # rand_noise: cache on device/dtype to skip repeated .to() transfers
-        if self._rand_noise_cache is None or self._rand_noise_cache.dtype != h.dtype:
-            self._rand_noise_cache = self.rand_noise.to(device=h.device, dtype=h.dtype)
-        x = self._rand_noise_cache[:, :, :h.size(1)].tile(2*b, 1, 1)
-        x0 = x.clone()
-        x_in   = torch.zeros([2*b, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        mask_in = torch.zeros([2*b, 1,  x.size(2)], device=x.device, dtype=x.dtype)
-        mu_in  = torch.zeros([2*b, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        t_in   = torch.zeros([2*b],                device=x.device, dtype=x.dtype)
-        spks_in = torch.zeros([2*b, 80],           device=x.device, dtype=x.dtype)
-        cond_in = torch.zeros([2*b, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        h = h.transpose(1, 2).contiguous()
 
-        # pre-compute mask_tiled (unchanged across BNS steps)
-        mask_tiled = mask.tile(2, 1, 1)
-        # pre-allocate U_cat to avoid torch.cat allocations in loop
-        U_cat = torch.empty([b, 80, x.size(2), 3], device=x.device, dtype=x.dtype)
-
-        for step in range(3):
-            time = torch.tensor([0.], device=x0.device, dtype=x0.dtype) if step == 0 else t_span[step-1].unsqueeze(0)
-
+        for step in range(0, 3):
+            
             x_in[:] = x
-            mask_in[:] = mask_tiled
-            mu_in[:b] = h
-            t_in[:] = time.tile(2*b)
-            spks_in[:b] = embedding
-            cond_in[:b] = conds
+            mask_in[:] = mask
+            mu_in[0] = h
+
+            spks_in[0] = embedding
+            cond_in[0] = conds
+            
+            
+
+            if step == 0:
+                time = torch.tensor([0.], device=x0.device, dtype=x0.dtype)
+            else:
+                time = t_span[step-1].unsqueeze(0)
+            t_in[:] = time
+
             dphi_dt = self.decoder.forward_estimator(
                 x_in, mask_in,
                 mu_in, t_in,
@@ -718,13 +456,24 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
                 cond_in,
                 streaming
             )
-            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [b, b], dim=0)
+            
+
+
+
+            # dphi_dt=dphi_dt[0].unsqueeze(0)
+            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
             dphi_dt = ((1.0 + 0.3) * dphi_dt - 0.3 * cfg_dphi_dt)
-            U_cat[:, :, :, step] = dphi_dt
-            b_weight = self.BNS_sampling.b_weights[step].unsqueeze(0).unsqueeze(0).unsqueeze(0)
-            a_weight = self.BNS_sampling.a_weights[step]
-            x = a_weight * x0 + torch.sum(b_weight * U_cat[:, :, :, :step+1], dim=3).tile(2, 1, 1)
-        x=x[:,:,prompt_feat_len[0]:]
+            #  x, mask, mu, t, spks=None, cond=None, streaming=False
+            # dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [b, b], dim=0)
+            # dphi_dt = ((1.0 + 0.7) * dphi_dt - 0.7 * cfg_dphi_dt)
+            if step == 0:
+                U_cat=dphi_dt.unsqueeze(3)
+            else:
+                U_cat=torch.cat([U_cat, dphi_dt.unsqueeze(3)], dim=3)
+            b_weight=self.BNS_sampling.b_weights[step].unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            a_weight=self.BNS_sampling.a_weights[step]
+            x=a_weight*x0 + torch.sum(b_weight* U_cat,3) ## update by tranable weight a_weight and b_weight
+        x=x[:,:,prompt_feat_len:]
         # mask = (~make_pad_mask(mel_len1 + mel_len2)).to(h)
         # feat, cache['decoder_cache'] = self.decoder(
         #     mu=h.transpose(1, 2).contiguous(),
@@ -815,7 +564,8 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
         token = self.input_embedding(torch.clamp(token, min=0)) * mask
-
+        # print(finalize)
+        # print(self.pre_lookahead_len)
         # text encode
         if finalize is True:
             h = self.pre_lookahead_layer(token)
@@ -837,7 +587,10 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
             mask = (~make_pad_mask(token_len*2)).to(h)
         else:
             mask = (~make_pad_mask((token_len-self.pre_lookahead_len)*2)).to(h)
-
+        
+        # mask = (~make_pad_mask((mel_len1+mel_len2).sum(dim=-1).squeeze(dim=1))).to(h)
+        # print('mask',mask.shape)
+        # print('h',h.shape)
         feat,_ = self.decoder(
             mu=h.transpose(1, 2).contiguous(),
             mask=mask.unsqueeze(1),
@@ -849,7 +602,8 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         # if isinstance(feat, tuple):
         #     feat = feat[0]
         # x=feat
-        x = feat[:, :, mel_len1:]
+        x = feat[0][:, :, mel_len1:]
+        print(x.shape)
         # assert x.shape[2] == mel_len2
         return x.float(), None
 

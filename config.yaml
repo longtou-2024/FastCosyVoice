@@ -1,7 +1,7 @@
 model:
   model_dir: data/models/Fun-CosyVoice3-0.5B
-  llm_checkpoint: data/checkpoints/ave_llm.pt
-  flow_checkpoint: data/checkpoints/ave_flow.pt
+  llm_checkpoint: data/checkpoints_v2/llm/epoch_0_step_47000.pt
+  flow_checkpoint: data/checkpoints_v2/flow/epoch_0_step_14000.pt
   hift_checkpoint: data/checkpoints/hift.pt
   qwen3_dir: data/checkpoints/Qwen3-1.7B
 

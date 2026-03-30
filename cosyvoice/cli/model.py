@@ -62,7 +62,11 @@ class CosyVoiceModel:
         self.hift_cache_dict = {}
 
     def load(self, llm_model, flow_model, hift_model):
-        self.llm.load_state_dict(torch.load(llm_model, map_location=self.device), strict=True)
+        # print(llm_model)
+        cpt=torch.load(llm_model, map_location=self.device)
+        cpt.pop('epoch',None)
+        cpt.pop('step',None)
+        self.llm.load_state_dict(cpt, strict=True)
         self.llm.to(self.device)
         if self.fp16:
             self.llm.half()

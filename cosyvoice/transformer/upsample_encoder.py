@@ -56,30 +56,34 @@ class Upsample1D(nn.Module):
         # In this mode, first repeat interpolate, than conv with stride=1
         self.conv = nn.Conv1d(self.channels, self.out_channels, stride * 2 + 1, stride=1, padding=0)
 
-    def forward(self, inputs: torch.Tensor, input_lengths: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, inputs: torch.Tensor, input_lengths: torch.Tensor, conv_cache: torch.Tensor = torch.zeros(0, 0, 0)) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         outputs = F.interpolate(inputs, scale_factor=float(self.stride), mode="nearest")
-        outputs = F.pad(outputs, (self.stride * 2, 0), value=0.0)
+        if conv_cache.size(2) == 0:
+            outputs = F.pad(outputs, (self.stride * 2, 0), value=0.0)
+        else:
+            assert conv_cache.size(2) == self.stride * 2
+            outputs = torch.concat([conv_cache, outputs], dim=2)
+        conv_cache_new = outputs[:, :, -self.stride * 2:]
         outputs = self.conv(outputs)
-        return outputs, input_lengths * self.stride
+        return outputs, input_lengths * self.stride, conv_cache_new
 
 
 class PreLookaheadLayer(nn.Module):
-    def __init__(self, in_channels: int, channels: int, pre_lookahead_len: int = 1):
+    def __init__(self, channels: int, pre_lookahead_len: int = 1):
         super().__init__()
-        self.in_channels = in_channels
         self.channels = channels
         self.pre_lookahead_len = pre_lookahead_len
         self.conv1 = nn.Conv1d(
-            in_channels, channels,
+            channels, channels,
             kernel_size=pre_lookahead_len + 1,
             stride=1, padding=0,
         )
         self.conv2 = nn.Conv1d(
-            channels, in_channels,
+            channels, channels,
             kernel_size=3, stride=1, padding=0,
         )
 
-    def forward(self, inputs: torch.Tensor, context: torch.Tensor = torch.zeros(0, 0, 0)) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor, context: torch.Tensor = torch.zeros(0, 0, 0), conv2_cache: torch.Tensor = torch.zeros(0, 0, 0)) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         inputs: (batch_size, seq_len, channels)
         """
@@ -89,18 +93,22 @@ class PreLookaheadLayer(nn.Module):
         if context.size(2) == 0:
             outputs = F.pad(outputs, (0, self.pre_lookahead_len), mode='constant', value=0.0)
         else:
-            assert self.training is False, 'you have passed context, make sure that you are running inference mode'
             assert context.size(2) == self.pre_lookahead_len
             outputs = F.pad(torch.concat([outputs, context], dim=2), (0, self.pre_lookahead_len - context.size(2)), mode='constant', value=0.0)
         outputs = F.leaky_relu(self.conv1(outputs))
         # outputs
-        outputs = F.pad(outputs, (self.conv2.kernel_size[0] - 1, 0), mode='constant', value=0.0)
+        if conv2_cache.size(2) == 0:
+            outputs = F.pad(outputs, (self.conv2.kernel_size[0] - 1, 0), mode='constant', value=0.0)
+        else:
+            assert conv2_cache.size(2) == self.conv2.kernel_size[0] - 1
+            outputs = torch.concat([conv2_cache, outputs], dim=2)
+        conv2_cache_new = outputs[:, :, -(self.conv2.kernel_size[0] - 1):]
         outputs = self.conv2(outputs)
         outputs = outputs.transpose(1, 2).contiguous()
 
         # residual connection
         outputs = outputs + inputs
-        return outputs
+        return outputs, conv2_cache_new
 
 
 class UpsampleConformerEncoder(torch.nn.Module):
@@ -200,7 +208,7 @@ class UpsampleConformerEncoder(torch.nn.Module):
         # convolution module definition
         convolution_layer_args = (output_size, cnn_module_kernel, activation,
                                   cnn_module_norm, causal)
-        self.pre_lookahead_layer = PreLookaheadLayer(in_channels=512, channels=512, pre_lookahead_len=3)
+        self.pre_lookahead_layer = PreLookaheadLayer(channels=512, pre_lookahead_len=3)
         self.encoders = torch.nn.ModuleList([
             ConformerEncoderLayer(
                 output_size,
@@ -319,3 +327,92 @@ class UpsampleConformerEncoder(torch.nn.Module):
         for layer in self.up_encoders:
             xs, chunk_masks, _, _ = layer(xs, chunk_masks, pos_emb, mask_pad)
         return xs
+
+    @torch.jit.export
+    def forward_chunk(
+        self,
+        xs: torch.Tensor,
+        xs_lens: torch.Tensor,
+        offset: int = 0,
+        context: torch.Tensor = torch.zeros(0, 0, 0),
+        pre_lookahead_layer_conv2_cache: torch.Tensor = torch.zeros(0, 0, 0),
+        encoders_kv_cache: torch.Tensor = torch.zeros(0, 0, 0, 0, 0),
+        upsample_offset: int = 0,
+        upsample_conv_cache: torch.Tensor = torch.zeros(0, 0, 0),
+        upsample_kv_cache: torch.Tensor = torch.zeros(0, 0, 0, 0, 0)
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]]:
+        """Embed positions in tensor.
+
+        Args:
+            xs: padded input tensor (B, T, D)
+            xs_lens: input length (B)
+            offset: offset for positional encoding
+            context: context tensor for lookahead
+            pre_lookahead_layer_conv2_cache: cache for pre_lookahead_layer conv2
+            encoders_kv_cache: cache for encoders KV
+            upsample_offset: offset for upsample positional encoding
+            upsample_conv_cache: cache for upsample conv
+            upsample_kv_cache: cache for upsample KV
+        Returns:
+            encoder output tensor xs, masks, and cache tuple
+        """
+        assert xs.size(0) == 1
+        # tmp_masks is just for interface compatibility
+        tmp_masks = torch.ones(1,
+                               xs.size(1),
+                               device=xs.device,
+                               dtype=torch.bool)
+        tmp_masks = tmp_masks.unsqueeze(1)
+        if self.global_cmvn is not None:
+            xs = self.global_cmvn(xs)
+        # NOTE(xcsong): Before embed, shape(xs) is (b=1, time, mel-dim)
+        xs, pos_emb, _ = self.embed(xs, tmp_masks, offset)
+        offset += xs.size(1)
+        tmp_masks = torch.ones(1,
+                               context.size(1),
+                               device=context.device,
+                               dtype=torch.bool)
+        tmp_masks = tmp_masks.unsqueeze(1)
+        if context.size(1) != 0:
+            context, _, _ = self.embed(context, tmp_masks, offset)
+
+        # lookahead + conformer encoder
+        xs, pre_lookahead_layer_conv2_cache = self.pre_lookahead_layer(xs, context, pre_lookahead_layer_conv2_cache)
+        # NOTE in cache mode we do not need to call add_optional_chunk_mask
+        chunk_masks = torch.ones((1, xs.size(1), offset), dtype=torch.bool, device=xs.device)
+        mask_pad = torch.ones((0, 0, 0), dtype=torch.bool, device=xs.device)
+        encoders_kv_cache_list = []
+        for index, layer in enumerate(self.encoders):
+            xs, chunk_masks, encoders_kv_cache_new, _ = layer(xs, chunk_masks, pos_emb, mask_pad, encoders_kv_cache[index])
+            encoders_kv_cache_list.append(encoders_kv_cache_new)
+        encoders_kv_cache = torch.stack(encoders_kv_cache_list, dim=0)
+
+        # upsample
+        xs = xs.transpose(1, 2).contiguous()
+        xs, xs_lens, upsample_conv_cache = self.up_layer(xs, xs_lens, upsample_conv_cache)
+        xs = xs.transpose(1, 2).contiguous()
+
+        # tmp_masks is just for interface compatibility
+        tmp_masks = torch.ones(1,
+                               xs.size(1),
+                               device=xs.device,
+                               dtype=torch.bool)
+        tmp_masks = tmp_masks.unsqueeze(1)
+        xs, pos_emb, masks = self.up_embed(xs, tmp_masks, upsample_offset)
+        upsample_offset += xs.size(1)
+
+        # conformer encoder
+        chunk_masks = torch.ones((1, xs.size(1), upsample_offset), dtype=torch.bool, device=xs.device)
+        mask_pad = torch.ones((0, 0, 0), dtype=torch.bool, device=xs.device)
+        upsample_kv_cache_list = []
+        for index, layer in enumerate(self.up_encoders):
+            xs, chunk_masks, upsample_kv_cache_new, _ = layer(xs, chunk_masks, pos_emb, mask_pad, upsample_kv_cache[index])
+            upsample_kv_cache_list.append(upsample_kv_cache_new)
+        upsample_kv_cache = torch.stack(upsample_kv_cache_list, dim=0)
+
+        if self.normalize_before:
+            xs = self.after_norm(xs)
+        # Here we assume the mask is not changed in encoder layers, so just
+        # return the masks before encoder layers, and the masks will be used
+        # for cross attention with decoder later
+        return xs, masks, (offset, pre_lookahead_layer_conv2_cache, encoders_kv_cache, upsample_offset, upsample_conv_cache, upsample_kv_cache)

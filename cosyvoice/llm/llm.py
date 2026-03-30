@@ -22,14 +22,16 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from transformers import Qwen2ForCausalLM,AutoModel,AutoModelForCausalLM
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache, DynamicCache
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 from cosyvoice.utils.common import IGNORE_ID
 from cosyvoice.transformer.label_smoothing_loss import LabelSmoothingLoss
 from cosyvoice.utils.common import th_accuracy
 from cosyvoice.utils.file_utils import logging
 from cosyvoice.utils.mask import make_pad_mask
-#from cosyvoice.utils.onnx import SpeechTokenExtractor, online_feature, onnx_path
-
+from cosyvoice.utils.onnx import SpeechTokenExtractor, online_feature, onnx_path
+import tqdm
 
 class TransformerLM(torch.nn.Module):
     def __init__(
@@ -154,15 +156,52 @@ class TransformerLM(torch.nn.Module):
             sampling: int,
             ignore_eos: bool = True,
     ):
-        num_trials, max_trials = 0, 100
-        while True:
-            top_ids = self.sampling(weighted_scores, decoded_tokens, sampling)
-            if (not ignore_eos) or (top_ids < self.speech_token_size):
-                break
-            num_trials += 1
-            if num_trials > max_trials:
-                raise RuntimeError('sampling reaches max_trials {} and still get eos when ignore_eos is True, check your input!'.format(max_trials))
-        return top_ids
+        # weighted_scores=weighted_scores.squeeze(0)
+        # print('weighted_scores',weighted_scores.size())
+        if weighted_scores.dim() == 1:
+            num_trials, max_trials = 0, 100
+            while True:
+                top_ids = self.sampling(weighted_scores, decoded_tokens, sampling)
+                if (not ignore_eos) or (top_ids < self.speech_token_size):
+                    break
+                num_trials += 1
+                if num_trials > max_trials:
+                    raise RuntimeError('sampling reaches max_trials {} and still get eos when ignore_eos is True, check your input!'.format(max_trials))
+            return top_ids
+
+        if weighted_scores.dim() != 2:
+            raise ValueError(f'weighted_scores must be 1D or 2D, got shape {tuple(weighted_scores.shape)}')
+        batch_size = weighted_scores.size(0)
+        if isinstance(ignore_eos, torch.Tensor):
+            ignore_eos_list = ignore_eos.detach().cpu().reshape(-1).tolist()
+        elif isinstance(ignore_eos, (list, tuple)):
+            ignore_eos_list = list(ignore_eos)
+        else:
+            ignore_eos_list = [ignore_eos] * batch_size
+        if len(ignore_eos_list) != batch_size:
+            raise ValueError(f'ignore_eos batch size mismatch: expected {batch_size}, got {len(ignore_eos_list)}')
+
+        if len(decoded_tokens) == 0:
+            decoded_tokens_batch = [[] for _ in range(batch_size)]
+        elif isinstance(decoded_tokens[0], list):
+            decoded_tokens_batch = decoded_tokens
+        else:
+            decoded_tokens_batch = [decoded_tokens] * batch_size
+
+        sampled_ids = []
+        for i in range(batch_size):
+            num_trials, max_trials = 0, 100
+            # print('weighted_scores[i].shape',weighted_scores[i].size())
+            # print('decoded_tokens_batch[i].shape',decoded_tokens_batch[i])
+            while True:
+                top_ids = self.sampling(weighted_scores[i], decoded_tokens_batch[i], sampling)
+                if (not ignore_eos_list[i]) or (top_ids < self.speech_token_size):
+                    break
+                num_trials += 1
+                if num_trials > max_trials:
+                    raise RuntimeError('sampling reaches max_trials {} and still get eos when ignore_eos is True, check your input!'.format(max_trials))
+            sampled_ids.append(top_ids)
+        return torch.tensor(sampled_ids, dtype=torch.int64, device=weighted_scores.device)
 
     @torch.inference_mode()
     def inference(
@@ -249,7 +288,7 @@ class TransformerLM(torch.nn.Module):
 class Qwen2Encoder3(torch.nn.Module):
     def __init__(self, pretrain_path):
         super().__init__()
-        self.model = AutoModel.from_pretrained(pretrain_path)
+        self.model = AutoModel.from_pretrained(pretrain_path).eval()
 
     def forward(self, xs: torch.Tensor, xs_lens: torch.Tensor):
         T = xs.size(1)
@@ -293,7 +332,12 @@ class Qwen2Encoder(torch.nn.Module):
     #     return outs.hidden_states[-1], masks.unsqueeze(1)
 
     def forward_one_step(self, xs, masks, cache=None):
-        input_masks = masks[:, -1, :]
+        if masks.dim() == 2:
+            input_masks = masks
+        else:
+            input_masks = masks[:, -1, :]
+        if cache is not None and not isinstance(cache, Cache):
+            cache = DynamicCache.from_legacy_cache(cache)
         outs = self.model(
             inputs_embeds=xs,
             attention_mask=input_masks,
@@ -324,7 +368,12 @@ class Qwen2Encoder(torch.nn.Module):
 #         return outs.hidden_states[-1], masks.unsqueeze(1)
 
 #     def forward_one_step(self, xs, masks, cache=None):
-#         input_masks = masks[:, -1, :]
+#         if masks.dim() == 2:
+#             input_masks = masks
+#         else:
+#             input_masks = masks[:, -1, :]
+#         if cache is not None and not isinstance(cache, Cache):
+#             cache = DynamicCache.from_legacy_cache(cache)
 #         outs = self.model(
 #             inputs_embeds=xs,
 #             attention_mask=input_masks,
@@ -336,6 +385,24 @@ class Qwen2Encoder(torch.nn.Module):
 #         xs = outs.hidden_states[-1]
 #         new_cache = outs.past_key_values
 #         return xs, new_cache
+    # def forward_one_step(self, xs, masks, cache=None):
+    #     if masks.dim() == 2:
+    #         input_masks = masks
+    #     else:
+    #         input_masks = masks[:, -1, :]
+    #     if cache is not None and not isinstance(cache, Cache):
+    #         cache = DynamicCache.from_legacy_cache(cache)
+    #     outs = self.model(
+    #         inputs_embeds=xs,
+    #         attention_mask=input_masks,
+    #         output_hidden_states=True,
+    #         return_dict=True,
+    #         use_cache=True,
+    #         past_key_values=cache,
+    #     )
+    #     xs = outs.hidden_states[-1]
+    #     new_cache = outs.past_key_values
+    #     return xs, new_cache
 
 
 
@@ -385,6 +452,47 @@ class Qwen2LM(TransformerLM):
         # 5. vllm related
         self.stop_token_ids = [speech_token_size + i for i in range(3)]
         self.vllm_output_queue = {}
+
+    def _expand_to_batch(self, tensor: torch.Tensor, batch_size: int, name: str) -> torch.Tensor:
+        if tensor.dim() == 0:
+            return tensor.reshape(1).expand(batch_size)
+        if tensor.size(0) == batch_size:
+            return tensor
+        if tensor.size(0) == 1:
+            expand_sizes = [batch_size] + [-1] * (tensor.dim() - 1)
+            return tensor.expand(*expand_sizes)
+        raise ValueError(f'{name} batch size mismatch: expected 1 or {batch_size}, got {tensor.size(0)}')
+
+    def _build_decode_input(self, parts_per_sample: List[List[torch.Tensor]], device: torch.device):
+        lm_input = [torch.concat(parts, dim=0) for parts in parts_per_sample]
+        lm_input_len = torch.tensor([item.size(0) for item in lm_input], dtype=torch.int32, device=device)
+        lm_input = pad_sequence(lm_input, batch_first=True, padding_value=0.0)
+        return lm_input, lm_input_len
+
+    def _gather_last_valid_logits(self, y_pred: torch.Tensor, input_lens: torch.Tensor) -> torch.Tensor:
+        batch_indices = torch.arange(y_pred.size(0), device=y_pred.device)
+        last_indices = (input_lens.to(device=y_pred.device, dtype=torch.long) - 1).clamp_min(0)
+        return y_pred[batch_indices, last_indices]
+
+    def _select_cache(self, cache, keep_indices: torch.Tensor):
+        if cache is None:
+            return None
+
+        keep_indices = keep_indices.to(dtype=torch.long)
+        if isinstance(cache, Cache):
+            cache.batch_select_indices(keep_indices)
+            return cache
+
+        selected_cache = []
+        for layer_cache in cache:
+            if isinstance(layer_cache, tuple):
+                selected_cache.append(tuple(
+                    tensor.index_select(0, keep_indices) if torch.is_tensor(tensor) else tensor
+                    for tensor in layer_cache
+                ))
+            else:
+                selected_cache.append(layer_cache.index_select(0, keep_indices) if torch.is_tensor(layer_cache) else layer_cache)
+        return DynamicCache.from_legacy_cache(tuple(selected_cache))
 
     def prepare_lm_input_target(self, sos_emb, text_token, text_token_emb, text_token_len, task_id_emb, speech_token, speech_token_emb, speech_token_len,caption_token,caption_lengths, instruct_token=None, instruct_token_emb=None, instruct_token_len=None):
         lm_target, lm_input = [], []
@@ -558,35 +666,53 @@ class Qwen2LM(TransformerLM):
             uuid: str = '',
     ) -> Generator[torch.Tensor, None, None]:
         device = text.device
+        batch_size = text.size(0)
+        prompt_text = self._expand_to_batch(prompt_text, batch_size, 'prompt_text')
+        prompt_text_len = self._expand_to_batch(prompt_text_len, batch_size, 'prompt_text_len')
+        prompt_speech_token = self._expand_to_batch(prompt_speech_token, batch_size, 'prompt_speech_token')
+        prompt_speech_token_len = self._expand_to_batch(prompt_speech_token_len, batch_size, 'prompt_speech_token_len')
+
         text = torch.concat([prompt_text, text], dim=1)
-        text_len += prompt_text_len
+        text_len = text_len + prompt_text_len
         text = self.llm.model.model.embed_tokens(text)
 
         # 3. concat llm_input
-        sos_emb = self.llm_embedding.weight[self.sos].reshape(1, 1, -1)
-        task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1)
-        if prompt_speech_token_len != 0:
+        sos_emb = self.llm_embedding.weight[self.sos].reshape(1, 1, -1).expand(batch_size, -1, -1)
+        task_id_emb = self.llm_embedding.weight[self.task_id].reshape(1, 1, -1).expand(batch_size, -1, -1)
+        if prompt_speech_token.size(1) > 0 and torch.any(prompt_speech_token_len > 0):
             prompt_speech_token_emb = self.speech_embedding(prompt_speech_token)
         else:
-            prompt_speech_token_emb = torch.zeros(1, 0, self.llm_input_size, dtype=text.dtype).to(device)
-        lm_input = torch.concat([sos_emb, text, task_id_emb, prompt_speech_token_emb], dim=1)
+            prompt_speech_token_emb = torch.zeros(batch_size, 0, self.llm_input_size, dtype=text.dtype, device=device)
+        lm_parts = []
+        for i in range(batch_size):
+            lm_parts.append([
+                sos_emb[i],
+                text[i, :int(text_len[i].item())],
+                task_id_emb[i],
+                prompt_speech_token_emb[i, :int(prompt_speech_token_len[i].item())],
+            ])
+        lm_input, lm_input_len = self._build_decode_input(lm_parts, device)
 
         # 4. cal min/max_length
-        min_len = int((text_len - prompt_text_len) * min_token_text_ratio)
-        max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
+        decode_text_len = (text_len - prompt_text_len).to(torch.float32)
+        min_len = torch.floor(decode_text_len * min_token_text_ratio).to(torch.int64).clamp_min(0)
+        max_len = torch.ceil(decode_text_len * max_token_text_ratio).to(torch.int64).clamp_min(1)
 
         # 5. step by step decode
-        for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+        for token in self.inference_wrapper(lm_input, lm_input_len, sampling, min_len, max_len, uuid):
             yield token
 
     @torch.inference_mode()
-    def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
+    def inference_wrapper(self, lm_input, lm_input_len, sampling, min_len, max_len, uuid, initial_cache=None):
+        batch_size = lm_input.size(0)
         if hasattr(self, 'vllm'):
+            if batch_size != 1:
+                raise NotImplementedError('vLLM inference_wrapper currently supports batch_size=1 only')
             from vllm import SamplingParams, RequestOutput
             sampling_params = SamplingParams(top_k=sampling,
                                              stop_token_ids=self.stop_token_ids,
-                                             min_tokens=min_len,
-                                             max_tokens=max_len)
+                                             min_tokens=int(min_len[0].item()),
+                                             max_tokens=int(max_len[0].item()))
             with self.lock:
                 self.vllm.add_request(uuid, {"prompt_embeds": lm_input.squeeze(0).to(torch.bfloat16).to(lm_input.device)}, sampling_params)
                 self.vllm_output_queue[uuid] = queue.Queue()
@@ -605,26 +731,72 @@ class Qwen2LM(TransformerLM):
                     # in stream mode, yield token one by one
                     yield top_ids
                     out_tokens.append(top_ids)
-                    if len(out_tokens) == max_len:
+                    if len(out_tokens) == int(max_len[0].item()):
                         break
                 time.sleep(0.001)
             with self.lock:
                 self.vllm_output_queue.pop(uuid)
         else:
-            out_tokens = []
-            cache = None
-            for i in range(max_len):
-                y_pred, cache = self.llm.forward_one_step(lm_input,
-                                                          masks=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]), device=lm_input.device)).to(torch.bool),
-                                                          cache=cache)
-                logp = self.llm_decoder(y_pred[:, -1]).log_softmax(dim=-1)
-                top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=True if i < min_len else False)
-                if top_ids in self.stop_token_ids:
+            decoded_tokens = [[] for _ in range(batch_size)]
+            active_indices = torch.arange(batch_size, device=lm_input.device, dtype=torch.long)
+            active_input = lm_input
+            active_input_len = lm_input_len.to(device=lm_input.device, dtype=torch.int64)
+            cache = initial_cache
+            max_steps = int(max_len.max().item())
+            for i in range(max_steps):
+                expired_mask = i >= max_len.index_select(0, active_indices)
+                if torch.any(expired_mask):
+                    keep_mask = ~expired_mask
+                    if not torch.any(keep_mask):
+                        break
+                    if cache is not None:
+                        cache = self._select_cache(cache, keep_mask.nonzero(as_tuple=False).squeeze(1))
+                    active_indices = active_indices[keep_mask]
+                    active_input = active_input[keep_mask]
+                    active_input_len = active_input_len[keep_mask]
+                # Build attention mask covering past (cached) + current positions
+                past_len = cache.get_seq_length() if cache is not None else 0
+                total_len = past_len + active_input.size(1)
+                valid_mask = torch.arange(total_len, device=active_input.device).unsqueeze(0) < (past_len + active_input_len).unsqueeze(1)
+                y_pred, cache = self.llm.forward_one_step(active_input, masks=valid_mask, cache=cache)
+                last_hidden = self._gather_last_valid_logits(y_pred, active_input_len)
+                logp = self.llm_decoder(last_hidden).log_softmax(dim=-1)
+                ignore_eos = i < min_len.index_select(0, active_indices)
+                active_histories = [decoded_tokens[idx] for idx in active_indices.tolist()]
+                top_ids = self.sampling_ids(logp, active_histories, sampling, ignore_eos=ignore_eos)
+                if not torch.is_tensor(top_ids):
+                    top_ids = torch.tensor([top_ids], dtype=torch.int64, device=logp.device)
+                stop_ids = self._stop_ids_tensor
+                stop_mask = (top_ids.unsqueeze(1) == stop_ids.unsqueeze(0)).any(dim=1)
+
+                if batch_size == 1:
+                    if stop_mask[0]:
+                        break
+                    token = int(top_ids[0].item())
+                    yield token
+                    decoded_tokens[0].append(token)
+                else:
+                    step_tokens = torch.full((batch_size,), IGNORE_ID, dtype=torch.int32, device=top_ids.device)
+                    finished_indices = active_indices[stop_mask]
+                    live_tokens = top_ids[~stop_mask].to(torch.int32)
+                    if finished_indices.numel() > 0:
+                        step_tokens.index_fill_(0, finished_indices, IGNORE_ID - 1)
+                    step_tokens.index_copy_(0, active_indices[~stop_mask], live_tokens)
+                    if live_tokens.numel() > 0 or finished_indices.numel() > 0:
+                        yield step_tokens
+                    for batch_idx, token in zip(active_indices[~stop_mask].tolist(), live_tokens.tolist()):
+                        decoded_tokens[batch_idx].append(token)
+
+                if torch.all(stop_mask):
                     break
-                # in stream mode, yield token one by one
-                yield top_ids
-                out_tokens.append(top_ids)
-                lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+
+                keep_mask = ~stop_mask
+                kept_indices = active_indices[keep_mask]
+                if cache is not None and keep_mask.sum().item() != keep_mask.numel():
+                    cache = self._select_cache(cache, keep_mask.nonzero(as_tuple=False).squeeze(1))
+                active_indices = kept_indices
+                active_input = self.speech_embedding(top_ids[keep_mask]).unsqueeze(1)
+                active_input_len = torch.ones(active_input.size(0), dtype=torch.int64, device=active_input.device)
 
     @torch.inference_mode()
     def inference_bistream(
@@ -827,7 +999,40 @@ class CosyVoice3LM(Qwen2LM):
 
         # 5. vllm related
         self.stop_token_ids = [speech_token_size + i for i in range(200)]
+        self.register_buffer('_stop_ids_tensor', torch.tensor(self.stop_token_ids, dtype=torch.int64))
         self.vllm_output_queue = {}
+
+    # ── Prompt KV Cache ──────────────────────────────────────────────────
+    @torch.inference_mode()
+    def compute_prefix_cache(self, prompt_text, prompt_text_len, LM_latents):
+        """Pre-compute KV cache for fixed prefix [SOS | LM_latents | prompt_text_emb].
+
+        Call once per speaker, then pass the returned cache to inference().
+        All tensors should already be on the correct device.
+        """
+        prompt_text_emb = self.llm.model.embed_tokens(prompt_text[:1]).to(prompt_text.device)
+        LM_latents_processed = self.llm_caption(LM_latents[:1])
+
+        sos_emb = self.speech_embedding.weight[self.sos].reshape(1, 1, -1)
+        plen = int(prompt_text_len[0].item()) if prompt_text_len.dim() >= 1 else int(prompt_text_len.item())
+        prefix = torch.cat([sos_emb, LM_latents_processed, prompt_text_emb[:, :plen]], dim=1)
+
+        valid_mask = torch.ones(1, prefix.size(1), dtype=torch.bool, device=prefix.device)
+        _, cache = self.llm.forward_one_step(prefix, masks=valid_mask, cache=None)
+        logging.info('[CosyVoice3LM] Prefix cache computed: %d positions', prefix.size(1))
+        return cache
+
+    @staticmethod
+    def _clone_and_expand_cache(cache, batch_size):
+        """Clone a batch_size=1 DynamicCache and expand to *batch_size*."""
+        new_cache = DynamicCache()
+        for layer_idx in range(len(cache.key_cache)):
+            new_cache.update(
+                cache.key_cache[layer_idx].expand(batch_size, -1, -1, -1).contiguous(),
+                cache.value_cache[layer_idx].expand(batch_size, -1, -1, -1).contiguous(),
+                layer_idx,
+            )
+        return new_cache
 
     def forward(
             self,
@@ -853,8 +1058,8 @@ class CosyVoice3LM(Qwen2LM):
         # instruct_token = batch['instruct_token'].to(device)
         # instruct_token_len = batch['instruct_token_len'].to(device)
         caption_token = batch['LM_latents'].to(device)
-        caption_lengths = batch['caption_lengths'].to(device)
         
+        caption_lengths = batch['caption_lengths'].to(device)
         
         text_token_emb = self.llm.model.embed_tokens(text_token)
 
@@ -895,6 +1100,7 @@ class CosyVoice3LM(Qwen2LM):
             prompt_speech_token_len: torch.Tensor,
             embedding: torch.Tensor,
             LM_latents: torch.Tensor,
+            prefix_cache=None,
             sampling: int = 25,
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
@@ -903,27 +1109,63 @@ class CosyVoice3LM(Qwen2LM):
         torch.manual_seed(1986)
         torch.cuda.manual_seed_all(1986)
         device = text.device
-        text = torch.concat([prompt_text, text], dim=1)
-        text_len += prompt_text_len
-        text = self.llm.model.embed_tokens(text)
-        # print(LM_latents.size())
-        LM_latents=self.llm_caption(LM_latents)
-        # print("save LM_latents")
-        # torch.save(LM_latents.detach().cpu(), '/home/kayden.k/FastCosyVoice/LM_latents_angry.pt')
-        # print("save LM_latents done")
-        # 3. concat llm_input
-        sos_emb = self.speech_embedding.weight[self.sos].reshape(1, 1, -1)
-        task_id_emb = self.speech_embedding.weight[self.task_id].reshape(1, 1, -1)
-        if prompt_speech_token_len != 0:
+        batch_size = text.size(0)
+        prompt_speech_token = self._expand_to_batch(prompt_speech_token, batch_size, 'prompt_speech_token')
+        prompt_speech_token_len = self._expand_to_batch(prompt_speech_token_len, batch_size, 'prompt_speech_token_len')
+
+        task_id_emb = self.speech_embedding.weight[self.task_id].reshape(1, 1, -1).expand(batch_size, -1, -1)
+        if prompt_speech_token.size(1) > 0 and torch.any(prompt_speech_token_len > 0):
             prompt_speech_token_emb = self.speech_embedding(prompt_speech_token)
         else:
-            prompt_speech_token_emb = torch.zeros(1, 0, self.llm_input_size, dtype=text.dtype).to(device)
-        lm_input = torch.concat([sos_emb,LM_latents, text, task_id_emb, prompt_speech_token_emb], dim=1)
+            prompt_speech_token_emb = torch.zeros(batch_size, 0, self.llm_input_size, dtype=torch.float32, device=device)
+
+        # if prefix_cache is not None:
+        #     # ── Fast path: prefix [SOS | LM_latents | prompt_text_emb] is cached ──
+        #     # `text` contains ONLY tts_text (not concatenated with prompt_text)
+        #     tts_text_emb = self.llm.model.embed_tokens(text).to(device)
+        #     lm_parts = []
+        #     for i in range(batch_size):
+        #         lm_parts.append([
+        #             tts_text_emb[i, :int(text_len[i].item())],
+        #             task_id_emb[i],
+        #             prompt_speech_token_emb[i, :int(prompt_speech_token_len[i].item())],
+        #         ])
+        #     lm_input, lm_input_len = self._build_decode_input(lm_parts, device)
+        #     initial_cache = self._clone_and_expand_cache(prefix_cache, batch_size)
+        #     decode_text_len = text_len.to(torch.float32)
+        # else:
+            # ── Original path: no prefix cache ────────────────────────────────
+        prompt_text = self._expand_to_batch(prompt_text, batch_size, 'prompt_text')
+        prompt_text_len = self._expand_to_batch(prompt_text_len, batch_size, 'prompt_text_len')
+        LM_latents = self._expand_to_batch(LM_latents, batch_size, 'LM_latents')
+        # Embed prompt_text and text separately, then concat per-sample
+        # to avoid padding contamination when prompt lengths differ
+        prompt_text_emb = self.llm.model.embed_tokens(prompt_text).to(device)
+        text_emb = self.llm.model.embed_tokens(text).to(device)
+        LM_latents = self.llm_caption(LM_latents)
+        sos_emb = self.speech_embedding.weight[self.sos].reshape(1, 1, -1).expand(batch_size, -1, -1)
+        lm_parts = []
+
+        for i in range(batch_size):
+            pt_len_i = int(prompt_text_len[i].item())
+            t_len_i = int(text_len[i].item())
+            lm_parts.append([
+                sos_emb[i],
+                LM_latents[i],
+                prompt_text_emb[i, :pt_len_i],
+                text_emb[i, :t_len_i],
+                task_id_emb[i],
+                prompt_speech_token_emb[i, :int(prompt_speech_token_len[i].item())],
+            ])
+        lm_input, lm_input_len = self._build_decode_input(lm_parts, device)
+        initial_cache = None
+        decode_text_len = text_len.to(torch.float32)
 
         # 4. cal min/max_length
-        min_len = int((text_len - prompt_text_len) * min_token_text_ratio)
-        max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
+        min_len = torch.floor(decode_text_len * min_token_text_ratio).to(torch.int64).clamp_min(0)
+        max_len = torch.ceil(decode_text_len * max_token_text_ratio).to(torch.int64).clamp_min(1)
 
         # 5. step by step decode
-        for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+        for token in self.inference_wrapper(lm_input, lm_input_len, sampling, min_len, max_len, uuid,
+                                            initial_cache=initial_cache):
             yield token

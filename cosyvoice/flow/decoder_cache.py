@@ -835,9 +835,10 @@ class CausalConditionalDecoder(ConditionalDecoder):
         hiddens = []
         masks = [mask]
 
-        down_blocks_kv_cache_new = torch.zeros(1, 4, 2, x.size(2), 512, 2).to(x.device)
-        mid_blocks_kv_cache_new = torch.zeros(12, 4, 2, x.size(2), 512, 2).to(x.device)
-        up_blocks_kv_cache_new = torch.zeros(1, 4, 2, x.size(2), 512, 2).to(x.device)
+        B_cfg = x.size(0)  # 2*B for CFG (supports batch > 1)
+        down_blocks_kv_cache_new = torch.zeros(1, 4, B_cfg, x.size(2), 512, 2, device=x.device, dtype=x.dtype)
+        mid_blocks_kv_cache_new = torch.zeros(12, 4, B_cfg, x.size(2), 512, 2, device=x.device, dtype=x.dtype)
+        up_blocks_kv_cache_new = torch.zeros(1, 4, B_cfg, x.size(2), 512, 2, device=x.device, dtype=x.dtype)
         for index, (resnet, transformer_blocks, downsample) in enumerate(self.down_blocks):
             mask_down = masks[-1]
             x, down_blocks_conv_cache[index][:, :320], down_blocks_conv_cache[index][:, 320: 576] = \

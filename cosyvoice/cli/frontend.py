@@ -46,8 +46,7 @@ class CosyVoiceFrontEnd:
                  campplus_model: str,
                  speech_tokenizer_model: str,
                  spk2info: str = '',
-                 allowed_special: str = 'all',
-                 qwen3_model_dir: str = None):
+                 allowed_special: str = 'all'):
         self.tokenizer = get_tokenizer()
         self.feat_extractor = feat_extractor
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -75,9 +74,12 @@ class CosyVoiceFrontEnd:
             self.en_tn_model = EnNormalizer()
             self.inflect_parser = inflect.engine()
 
-        if qwen3_model_dir is not None:
-            self.tokenizer_q_3 = get_qwen_tokenizer(qwen3_model_dir, skip_special_tokens=True)
-            self.Qwen3 = Qwen2Encoder3(qwen3_model_dir).eval().to('cpu')
+        #Qwen3_model_dir='/home/kayden.k/FastCosyVoice/pretrained_models/Qwen3-1.7B'
+        Qwen3_model_dir='/home/longtou.2024/projects/FastCosyVoice/data/checkpoints/Qwen3-1.7B'
+        
+        self.tokenizer_q_3=get_qwen_tokenizer(Qwen3_model_dir,skip_special_tokens=True)
+        
+        self.Qwen3=Qwen2Encoder3(Qwen3_model_dir).eval().to('cpu')
         
         
 
@@ -200,7 +202,7 @@ class CosyVoiceFrontEnd:
                 attention_mask=mask,
                 output_hidden_states=True,
                 return_dict=True,)
-            LM_latents=LM_latents.hidden_states[-1]
+            LM_latents=LM_latents.hidden_states[-1].detach()
             
             
             model_input = {'prompt_text': prompt_text_token, 'prompt_text_len': prompt_text_token_len,

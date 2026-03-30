@@ -136,6 +136,7 @@ def init_weights(m, mean=0.0, std=0.01):
 
 # Repetition Aware Sampling in VALL-E 2
 def ras_sampling(weighted_scores, decoded_tokens, sampling, top_p=0.8, top_k=25, win_size=10, tau_r=0.1):
+    # top_p=0.95
     top_ids = nucleus_sampling(weighted_scores, top_p=top_p, top_k=top_k)
     # Check for repetition - only look at recent tokens
     if len(decoded_tokens) > 0:
@@ -149,7 +150,7 @@ def ras_sampling(weighted_scores, decoded_tokens, sampling, top_p=0.8, top_k=25,
 def nucleus_sampling(weighted_scores, top_p=0.8, top_k=25):
     """Vectorized nucleus (top-p + top-k) sampling - optimized for GPU."""
     # Compute softmax probabilities
-    probs = weighted_scores.softmax(dim=0)
+    probs = (weighted_scores).softmax(dim=0)
     
     # Sort by probability (descending)
     sorted_probs, sorted_indices = probs.sort(descending=True)
