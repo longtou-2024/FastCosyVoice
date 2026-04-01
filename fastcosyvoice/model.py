@@ -341,28 +341,25 @@ class FastCosyVoice3Model:
         """
         assert torch.cuda.is_available(), 'TensorRT only supports GPU!'
 
-        # Use file lock to serialize ONNX export + TRT build across processes
-        lock_path = flow_decoder_estimator_model + '.lock'
-        with open(lock_path, 'w') as lock_f:
-            fcntl.flock(lock_f, fcntl.LOCK_EX)
-            try:
-                # Auto-export ONNX if missing
-                if not os.path.exists(flow_decoder_onnx_model) or os.path.getsize(flow_decoder_onnx_model) == 0:
-                    from cosyvoice.utils.file_utils import export_cache_flow_decoder_onnx
-                    export_cache_flow_decoder_onnx(
-                        estimator=self.flow.decoder.estimator,
-                        onnx_path=flow_decoder_onnx_model,
-                        device=self.device,
-                        flow_decoder_required_cache_size=self.flow_decoder_required_cache_size,
-                        flow_n_timesteps=self.flow_n_timesteps,
-                    )
-
-                # Build TRT plan if missing
-                if not os.path.exists(flow_decoder_estimator_model) or os.path.getsize(flow_decoder_estimator_model) == 0:
+        # If pre-built TRT plan exists, skip ONNX export + TRT build
+        if not os.path.exists(flow_decoder_estimator_model) or os.path.getsize(flow_decoder_estimator_model) == 0:
+            lock_path = flow_decoder_estimator_model + '.lock'
+            with open(lock_path, 'w') as lock_f:
+                fcntl.flock(lock_f, fcntl.LOCK_EX)
+                try:
+                    if not os.path.exists(flow_decoder_onnx_model) or os.path.getsize(flow_decoder_onnx_model) == 0:
+                        from cosyvoice.utils.file_utils import export_cache_flow_decoder_onnx
+                        export_cache_flow_decoder_onnx(
+                            estimator=self.flow.decoder.estimator,
+                            onnx_path=flow_decoder_onnx_model,
+                            device=self.device,
+                            flow_decoder_required_cache_size=self.flow_decoder_required_cache_size,
+                            flow_n_timesteps=self.flow_n_timesteps,
+                        )
                     logging.info(f'Converting cache flow ONNX to TRT: {flow_decoder_onnx_model} -> {flow_decoder_estimator_model}')
                     convert_onnx_to_trt(flow_decoder_estimator_model, self.get_trt_kwargs_cache(fp16, max_batch_size), flow_decoder_onnx_model, fp16)
-            finally:
-                fcntl.flock(lock_f, fcntl.LOCK_UN)
+                finally:
+                    fcntl.flock(lock_f, fcntl.LOCK_UN)
 
         del self.flow.decoder.estimator
 

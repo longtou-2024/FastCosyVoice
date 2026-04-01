@@ -84,6 +84,9 @@ class MultiProcessTTS:
         flow_trt_max_batch_size: int = 8,
         llm_device: str = 'cuda:0',
         flow_devices: Optional[List[str]] = None,
+        qwen3_dir: str = None,
+        on_frontend_loaded: Optional[callable] = None,
+        on_workers_ready: Optional[callable] = None,
     ):
         self.model_dir = model_dir
         self.fp16 = fp16
@@ -110,8 +113,13 @@ class MultiProcessTTS:
             os.path.join(model_dir, 'speech_tokenizer_v3.onnx'),
             os.path.join(model_dir, 'spk2info.pt'),
             configs['allowed_special'],
+            qwen3_model_dir=qwen3_dir,
         )
         del configs
+
+        # Callback: frontend loaded, Qwen3/ONNX files no longer needed on disk
+        if on_frontend_loaded:
+            on_frontend_loaded()
 
         # ── Create inter-process queues ───────────────────────────────────
         ctx = mp.get_context('spawn')
@@ -157,6 +165,10 @@ class MultiProcessTTS:
             ready_count += 1
             logger.info('%s process ready (%d/%d)', msg['from'], ready_count, total_workers)
         logger.info('All worker processes ready')
+
+        # Callback: all models loaded into GPU, disk files no longer needed
+        if on_workers_ready:
+            on_workers_ready()
 
     # ── helpers ──────────────────────────────────────────────────────────────
 

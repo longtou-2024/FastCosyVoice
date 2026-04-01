@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FastCosyVoice TTS</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #f5f7fa; color: #333; padding: 20px; }
+  .container { max-width: 800px; margin: 0 auto; }
+  h1 { text-align: center; margin-bottom: 6px; font-size: 1.6em; }
+  .subtitle { text-align: center; color: #888; margin-bottom: 24px; font-size: 0.9em; }
+
+  .card { background: #fff; border-radius: 12px; padding: 24px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }
+  .card h2 { font-size: 1.1em; margin-bottom: 16px; color: #555; }
+
+  label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 0.85em; color: #555; }
+  textarea, input[type=text], select {
+    width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px;
+    font-size: 0.95em; transition: border-color 0.2s;
+  }
+  textarea:focus, input:focus, select:focus { outline: none; border-color: #4a90d9; }
+  textarea { resize: vertical; min-height: 80px; }
+
+  .row { display: flex; gap: 12px; margin-bottom: 12px; }
+  .row > div { flex: 1; }
+
+  .field { margin-bottom: 12px; }
+
+  .btn-row { display: flex; gap: 12px; margin-top: 16px; }
+  button {
+    flex: 1; padding: 12px 20px; border: none; border-radius: 8px;
+    font-size: 1em; font-weight: 600; cursor: pointer; transition: all 0.2s;
+  }
+  .btn-primary { background: #4a90d9; color: #fff; }
+  .btn-primary:hover { background: #3a7bc8; }
+  .btn-primary:disabled { background: #a0c4e8; cursor: not-allowed; }
+  .btn-stop { background: #e74c3c; color: #fff; display: none; }
+  .btn-stop:hover { background: #c0392b; }
+  .btn-secondary { background: #eee; color: #555; }
+  .btn-secondary:hover { background: #ddd; }
+
+  .status { margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+            font-size: 0.85em; background: #f0f4ff; color: #4a6fa5; min-height: 20px; }
+  .status.error { background: #fef0f0; color: #c0392b; }
+  .status.success { background: #f0fef0; color: #27ae60; }
+  .status.loading { background: #fff8e1; color: #f57f17; }
+
+  .loading-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(245,247,250,0.92); z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px;
+  }
+  .loading-overlay.hidden { display: none; }
+  .loading-spinner {
+    width: 48px; height: 48px; border: 4px solid #ddd;
+    border-top-color: #4a90d9; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { font-size: 1.1em; color: #555; text-align: center; }
+
+  #audio-player { width: 100%; margin-top: 12px; }
+
+  .log { max-height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.8em;
+         background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 8px;
+         margin-top: 8px; white-space: pre-wrap; word-break: break-all; display: none; }
+</style>
+</head>
+<body>
+<div id="loading-overlay" class="loading-overlay">
+  <div class="loading-spinner"></div>
+  <div class="loading-text" id="loading-text">Loading model...</div>
+</div>
+
+<div class="container">
+  <h1>FastCosyVoice TTS</h1>
+  <p class="subtitle">Streaming TTS Demo</p>
+
+  <div class="card">
+    <h2>Input</h2>
+    <div class="field">
+      <label for="text-input">Text</label>
+      <textarea id="text-input" placeholder="Enter text to synthesize...">안녕하세요. 오늘 날씨가 정말 좋네요. 함께 산책하러 가실래요?</textarea>
+    </div>
+
+    <div class="field">
+      <label for="speaker">Speaker</label>
+      <select id="speaker">
+        <option value="">Loading...</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Output</h2>
+    <div class="btn-row">
+      <button id="btn-generate" class="btn-primary" onclick="generate()">Generate Speech</button>
+      <button id="btn-stop" class="btn-stop" onclick="stopGeneration()">Stop</button>
+      <button class="btn-secondary" onclick="clearAll()">Clear</button>
+    </div>
+
+    <div id="status" class="status">Ready</div>
+    <audio id="audio-player" controls></audio>
+    <div id="log" class="log"></div>
+  </div>
+</div>
+
+<script>
+const PCM_SAMPLE_RATE = 24000;
+let abortController = null;
+let isGenerating = false;
+let streamingPlayer = null;
+
+// ── Streaming PCM Player ──
+class StreamingPCMPlayer {
+  static PREBUFFER_SECONDS = 0.5;
+  static MIN_FLUSH_SAMPLES = 4800;
+  static MAX_FLUSH_SAMPLES = 24000;
+  static SCHEDULE_LOOKAHEAD = 0.05;
+  static JITTER_ALPHA = 0.3;
+
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+    if (this.audioContext.state === 'suspended') this.audioContext.resume();
+    this.nextStartTime = 0;
+    this.allChunks = [];
+    this.totalSamples = 0;
+    this.isPlaying = false;
+    this.pendingBytes = [];
+    this.pendingByteLen = 0;
+    this.prebuffering = true;
+    this.prebufferTarget = Math.floor(sampleRate * StreamingPCMPlayer.PREBUFFER_SECONDS) * 2;
+    this.lastFeedTime = 0;
+    this.avgInterval = 0;
+    this.jitter = 0;
+    this.adaptiveFlushSamples = StreamingPCMPlayer.MIN_FLUSH_SAMPLES;
+    this.gapCount = 0;
+  }
+
+  feed(pcmBytes) {
+    this.allChunks.push(new Uint8Array(pcmBytes));
+    this.pendingBytes.push(pcmBytes);
+    this.pendingByteLen += pcmBytes.length;
+
+    const now = performance.now();
+    if (this.lastFeedTime > 0) {
+      const interval = now - this.lastFeedTime;
+      const alpha = StreamingPCMPlayer.JITTER_ALPHA;
+      if (this.avgInterval === 0) {
+        this.avgInterval = interval;
+      } else {
+        const deviation = Math.abs(interval - this.avgInterval);
+        this.jitter = this.jitter * (1 - alpha) + deviation * alpha;
+        this.avgInterval = this.avgInterval * (1 - alpha) + interval * alpha;
+      }
+      const jitterSamples = Math.floor((this.jitter / 1000) * this.sampleRate);
+      this.adaptiveFlushSamples = Math.min(
+        StreamingPCMPlayer.MAX_FLUSH_SAMPLES,
+        Math.max(StreamingPCMPlayer.MIN_FLUSH_SAMPLES, jitterSamples * 2)
+      );
+    }
+    this.lastFeedTime = now;
+
+    if (this.prebuffering) {
+      if (this.pendingByteLen >= this.prebufferTarget) {
+        this.prebuffering = false;
+        this._flush();
+      }
+      return;
+    }
+
+    const pendingSamples = Math.floor(this.pendingByteLen / 2);
+    if (pendingSamples >= this.adaptiveFlushSamples) {
+      this._flush();
+    }
+  }
+
+  flush() {
+    this.prebuffering = false;
+    if (this.pendingByteLen > 0) this._flush();
+  }
+
+  _flush() {
+    const merged = new Uint8Array(this.pendingByteLen);
+    let off = 0;
+    for (const b of this.pendingBytes) { merged.set(b, off); off += b.length; }
+
+    const usable = merged.length - (merged.length % 2);
+    this.pendingBytes = usable < merged.length ? [merged.slice(usable)] : [];
+    this.pendingByteLen = merged.length - usable;
+    if (usable === 0) return;
+
+    const int16 = new Int16Array(merged.buffer, merged.byteOffset, usable / 2);
+    const numSamples = int16.length;
+    const audioBuffer = this.audioContext.createBuffer(1, numSamples, this.sampleRate);
+    const channelData = audioBuffer.getChannelData(0);
+    for (let i = 0; i < numSamples; i++) channelData[i] = int16[i] / 32768.0;
+
+    const source = this.audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this.audioContext.destination);
+
+    const now = this.audioContext.currentTime;
+    const lookahead = StreamingPCMPlayer.SCHEDULE_LOOKAHEAD;
+
+    if (this.nextStartTime === 0) {
+      const startAt = now + lookahead;
+      source.start(startAt);
+      this.nextStartTime = startAt + audioBuffer.duration;
+    } else if (this.nextStartTime > now) {
+      source.start(this.nextStartTime);
+      this.nextStartTime += audioBuffer.duration;
+    } else {
+      this.gapCount++;
+      const startAt = now + lookahead;
+      source.start(startAt);
+      this.nextStartTime = startAt + audioBuffer.duration;
+    }
+
+    this.totalSamples += numSamples;
+    this.isPlaying = true;
+  }
+
+  stop() {
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      this.audioContext.close().catch(() => {});
+    }
+    this.isPlaying = false;
+  }
+
+  toWavBlob() {
+    const pcmData = concatArrayBuffers(this.allChunks);
+    return pcmToWav(pcmData, this.sampleRate);
+  }
+
+  get durationSeconds() { return this.totalSamples / this.sampleRate; }
+}
+
+// ── UI helpers ──
+function setStatus(text, type = '') {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = 'status' + (type ? ' ' + type : '');
+}
+
+function appendLog(text) {
+  const el = document.getElementById('log');
+  el.style.display = 'block';
+  el.textContent += text + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearAll() {
+  stopGeneration();
+  document.getElementById('audio-player').src = '';
+  document.getElementById('log').textContent = '';
+  document.getElementById('log').style.display = 'none';
+  setStatus('Ready');
+}
+
+function setGenerating(state) {
+  isGenerating = state;
+  document.getElementById('btn-generate').disabled = state;
+  document.getElementById('btn-generate').style.display = state ? 'none' : '';
+  document.getElementById('btn-stop').style.display = state ? '' : 'none';
+}
+
+function stopGeneration() {
+  if (abortController) { abortController.abort(); abortController = null; }
+  if (streamingPlayer) { streamingPlayer.stop(); streamingPlayer = null; }
+  setGenerating(false);
+}
+
+// ── Model readiness polling ──
+let modelReady = false;
+
+async function pollHealth() {
+  const overlay = document.getElementById('loading-overlay');
+  const loadingText = document.getElementById('loading-text');
+  const btnGenerate = document.getElementById('btn-generate');
+
+  try {
+    const resp = await fetch('/health');
+    const data = await resp.json();
+
+    if (data.status === 'ready') {
+      modelReady = true;
+      overlay.classList.add('hidden');
+      btnGenerate.disabled = false;
+      setStatus('Ready');
+      fetchSpeakers();
+      return;
+    } else if (data.status === 'error') {
+      loadingText.textContent = 'Error: ' + (data.error || 'Unknown error');
+      return;
+    } else {
+      const msgs = {
+        'initializing': 'Initializing...',
+        'copying': 'Downloading model from GCS...',
+        'loading': 'Loading model...',
+        'warming_up': 'Warming up model...',
+      };
+      loadingText.textContent = msgs[data.status] || 'Loading...';
+    }
+  } catch (e) {
+    loadingText.textContent = 'Connecting to server...';
+  }
+
+  btnGenerate.disabled = true;
+  setTimeout(pollHealth, 2000);
+}
+
+async function fetchSpeakers() {
+  try {
+    const resp = await fetch('/api/speakers');
+    const data = await resp.json();
+    if (data.speakers && data.speakers.length > 0) {
+      const select = document.getElementById('speaker');
+      select.innerHTML = '';
+      data.speakers.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        select.appendChild(opt);
+      });
+    }
+  } catch (e) {
+    console.warn('Could not fetch speakers:', e);
+  }
+}
+
+pollHealth();
+
+// ── Trailer extraction ──
+function extractTrailer(chunk) {
+  const MAGIC = [0, 0, 0, 0];
+  for (let i = chunk.length - 1; i >= 4; i--) {
+    if (chunk[i-3] === 0 && chunk[i-2] === 0 && chunk[i-1] === 0 && chunk[i] === 0) {
+      const jsonStart = i + 1;
+      if (jsonStart >= chunk.length) continue;
+      try {
+        const text = new TextDecoder().decode(chunk.slice(jsonStart));
+        const meta = JSON.parse(text);
+        if (meta._tts_meta) {
+          return { pcm: chunk.slice(0, i - 3), meta };
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+
+// ── Generate ──
+async function generate() {
+  if (!modelReady) { setStatus('Model is still loading, please wait...', 'loading'); return; }
+  const text = document.getElementById('text-input').value.trim();
+  if (!text) { setStatus('Please enter text', 'error'); return; }
+
+  const speaker = document.getElementById('speaker').value;
+
+  document.getElementById('log').textContent = '';
+  setGenerating(true);
+
+  try {
+    await generateHTTPStream({ text, speaker });
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      setStatus('Error: ' + e.message, 'error');
+      appendLog('ERROR: ' + e.message);
+    }
+  } finally {
+    setGenerating(false);
+  }
+}
+
+async function generateHTTPStream(payload) {
+  setStatus('Streaming audio...');
+  abortController = new AbortController();
+
+  const startTime = performance.now();
+  let totalBytes = 0;
+  let firstChunkTime = null;
+  let serverMeta = null;
+
+  streamingPlayer = new StreamingPCMPlayer(PCM_SAMPLE_RATE);
+
+  const resp = await fetch('/api/tts/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: abortController.signal,
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error || `Server returned ${resp.status}`);
+  }
+
+  const reader = resp.body.getReader();
+  let prevChunk = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (prevChunk) {
+      if (done) {
+        const result = extractTrailer(prevChunk);
+        if (result) {
+          serverMeta = result.meta;
+          if (result.pcm.length > 0) {
+            streamingPlayer.feed(result.pcm);
+            totalBytes += result.pcm.length;
+          }
+        } else {
+          streamingPlayer.feed(prevChunk);
+          totalBytes += prevChunk.length;
+        }
+      } else {
+        streamingPlayer.feed(prevChunk);
+        totalBytes += prevChunk.length;
+      }
+      const duration = streamingPlayer.durationSeconds;
+      const statusExtra = streamingPlayer.prebuffering ? ' (buffering...)' : '';
+      setStatus(`Streaming... ${(totalBytes / 1024).toFixed(1)} KB, ${duration.toFixed(1)}s audio${statusExtra}`);
+    }
+
+    if (done) break;
+
+    if (!firstChunkTime) {
+      firstChunkTime = performance.now();
+      appendLog(`First chunk latency: ${(firstChunkTime - startTime).toFixed(0)}ms`);
+      appendLog(`Pre-buffering ${StreamingPCMPlayer.PREBUFFER_SECONDS}s before playback...`);
+    }
+
+    prevChunk = value;
+  }
+
+  streamingPlayer.flush();
+
+  const elapsed = performance.now() - startTime;
+  const duration = streamingPlayer.durationSeconds;
+  const gaps = streamingPlayer.gapCount;
+  const clientRtf = duration > 0 ? (elapsed / 1000) / duration : 0;
+
+  appendLog(`-- Client metrics --`);
+  appendLog(`Audio duration: ${duration.toFixed(2)}s`);
+  appendLog(`Total elapsed: ${(elapsed / 1000).toFixed(2)}s`);
+  appendLog(`Client RTF: ${clientRtf.toFixed(4)}`);
+
+  if (serverMeta) {
+    appendLog(`-- Server metrics --`);
+    appendLog(`Processing time: ${serverMeta.processing_time}s`);
+    appendLog(`TTFB: ${serverMeta.ttfb}s`);
+    appendLog(`Server RTF: ${serverMeta.rtf}`);
+  }
+
+  if (gaps > 0) {
+    appendLog(`${gaps} gap(s) detected during playback`);
+  } else {
+    appendLog(`No gaps - seamless playback`);
+  }
+
+  const wavBlob = streamingPlayer.toWavBlob();
+  const url = URL.createObjectURL(wavBlob);
+  document.getElementById('audio-player').src = url;
+
+  const rtfDisplay = serverMeta ? serverMeta.rtf : clientRtf.toFixed(4);
+  setStatus(`Done! ${duration.toFixed(1)}s audio, RTF=${rtfDisplay}` + (gaps > 0 ? `, ${gaps} gap(s)` : ''), 'success');
+  streamingPlayer = null;
+}
+
+// ── Audio utilities ──
+function concatArrayBuffers(arrays) {
+  let totalLen = 0;
+  arrays.forEach(a => totalLen += a.length);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  arrays.forEach(a => { result.set(a, offset); offset += a.length; });
+  return result;
+}
+
+function pcmToWav(pcmData, sampleRate) {
+  const buffer = new ArrayBuffer(44 + pcmData.length);
+  const view = new DataView(buffer);
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + pcmData.length, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, pcmData.length, true);
+  new Uint8Array(buffer, 44).set(pcmData);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+</script>
+</body>
+</html>
