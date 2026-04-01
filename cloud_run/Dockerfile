@@ -34,6 +34,7 @@ COPY third_party/ ${APP_DIR}/third_party/
 # ── Layer 3b: Project source ──
 COPY cosyvoice/ ${APP_DIR}/cosyvoice/
 COPY fastcosyvoice/ ${APP_DIR}/fastcosyvoice/
+COPY KENT-G2P/kent_g2p/ ${APP_DIR}/KENT-G2P/kent_g2p/
 
 # ── Layer 4: Cloud Run server files ──
 COPY cloud_run/ ${APP_DIR}/cloud_run/

@@ -14,3 +14,5 @@ speakers:
     audio: data/speakers/oneyoung/oneyoung.wav
   - name: 이병헌
     audio: data/speakers/byeongheon/byeongheon.wav
+
+pron_dic: "/home/longtou.2024/mount/longtou/saved/cloud_run/pron_dic/20260331/pron_data"

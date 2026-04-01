@@ -29,4 +29,5 @@ wetext>=0.1.2
 wget>=3.2
 x-transformers>=2.11.24
 fastapi>=0.115.4
+flashtext>=2.7
 uvicorn>=0.40.0

@@ -15,6 +15,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -28,8 +29,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT / "third_party" / "Matcha-TTS"))
+sys.path.insert(0, str(_PROJECT_ROOT / "KENT-G2P"))
 
 from fastcosyvoice.mp_tts import MultiProcessTTS
+from kent_g2p.CoreaSpeech.normalization import N2gkPlus
+from kent_g2p.pron_trans.transliterator import PronTransliterator
 
 torch.set_float32_matmul_precision("high")
 logging.basicConfig(
@@ -47,6 +51,18 @@ speakers: dict = {}  # {spk_id: {"audio": path, "prompt": text}}
 default_caption: str = ""
 model_status: str = "initializing"  # → "copying" → "loading" → "warming_up" → "ready" | "error"
 model_error: str = ""
+
+# ── Text preprocessing ────────────────────────────────────────────────────
+text_normalizer = N2gkPlus()
+pron_transliterator: PronTransliterator = None
+pron_dic_version: str = ""
+
+
+def _init_pron_transliterator(dic_dir: str):
+    global pron_transliterator
+    logger.info("PronTransliterator initializing (dic_dir=%s) ...", dic_dir)
+    pron_transliterator = PronTransliterator(dic_dir=dic_dir)
+    logger.info("PronTransliterator ready")
 
 
 def _log_tmp_usage(label: str = ""):
@@ -131,6 +147,14 @@ def init_pipeline(config_path: str):
 
         cfg = load_config(config_path)
         logger.info("Config loaded successfully")
+
+        # Parse pron_dic config (initialization deferred until after model loading)
+        global pron_dic_version
+        pron_dic = cfg.get("pron_dic", "")
+        pron_dic_path = str(project_root / pron_dic) if pron_dic else ""
+        import re as _re
+        date_match = _re.search(r'/(\d{8})/', pron_dic)
+        pron_dic_version = date_match.group(1) if date_match else ""
 
         model_status = "loading"
         model_dir = str(project_root / cfg["model"]["model_dir"])
@@ -220,6 +244,9 @@ def init_pipeline(config_path: str):
             shutil.rmtree("/tmp/model", ignore_errors=True)
             _log_tmp_usage("After final cleanup")
 
+        # Initialize text preprocessor (after cleanup to avoid memory peak overlap)
+        _init_pron_transliterator(pron_dic_path)
+
         # Step 5: Warmup
         model_status = "warming_up"
         if speakers:
@@ -290,6 +317,16 @@ async def tts_stream(payload: dict):
 
     caption = payload.get("caption", default_caption)
 
+    # Text preprocessing: transliteration → normalization
+    raw_text = text
+    apply_pron = payload.get("apply_pron", True)
+    apply_norm = payload.get("apply_norm", True)
+    if apply_pron and pron_transliterator is not None:
+        text = pron_transliterator(text)
+    if apply_norm:
+        text = text_normalizer(text)
+    logger.info("Preprocessed [%s]: '%s' → '%s'", spk_id, raw_text, text)
+
     loop = asyncio.get_event_loop()
     queue: asyncio.Queue = asyncio.Queue()
     _SENTINEL = object()
@@ -340,6 +377,8 @@ async def tts_stream(payload: dict):
 
         trailer = json.dumps({
             "_tts_meta": True,
+            "preprocessed_text": text,
+            "pron_dic_version": pron_dic_version,
             "audio_duration": round(audio_duration, 3),
             "processing_time": round(elapsed, 3),
             "ttfb": round(ttfb, 3),
@@ -363,7 +402,6 @@ def main():
     args = parser.parse_args()
 
     # Start full pipeline (GCS copy + model load) in background thread
-    import threading
     init_thread = threading.Thread(target=init_pipeline, args=(args.config,), daemon=True)
     init_thread.start()
 

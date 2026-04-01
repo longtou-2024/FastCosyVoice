@@ -93,6 +93,18 @@
         <option value="">Loading...</option>
       </select>
     </div>
+
+    <div class="field">
+      <label>Text Preprocessing</label>
+      <div style="display: flex; gap: 16px; margin-top: 4px;">
+        <label style="display: flex; align-items: center; gap: 6px; font-weight: normal; cursor: pointer;">
+          <input type="checkbox" id="cb-pron" checked> 발음사전 적용
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; font-weight: normal; cursor: pointer;">
+          <input type="checkbox" id="cb-norm" checked> 정규화
+        </label>
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -339,7 +351,7 @@ pollHealth();
 // ── Trailer extraction ──
 function extractTrailer(chunk) {
   const MAGIC = [0, 0, 0, 0];
-  for (let i = chunk.length - 1; i >= 4; i--) {
+  for (let i = chunk.length - 1; i >= 3; i--) {
     if (chunk[i-3] === 0 && chunk[i-2] === 0 && chunk[i-1] === 0 && chunk[i] === 0) {
       const jsonStart = i + 1;
       if (jsonStart >= chunk.length) continue;
@@ -362,12 +374,14 @@ async function generate() {
   if (!text) { setStatus('Please enter text', 'error'); return; }
 
   const speaker = document.getElementById('speaker').value;
+  const apply_pron = document.getElementById('cb-pron').checked;
+  const apply_norm = document.getElementById('cb-norm').checked;
 
   document.getElementById('log').textContent = '';
   setGenerating(true);
 
   try {
-    await generateHTTPStream({ text, speaker });
+    await generateHTTPStream({ text, speaker, apply_pron, apply_norm });
   } catch (e) {
     if (e.name !== 'AbortError') {
       setStatus('Error: ' + e.message, 'error');
@@ -409,6 +423,8 @@ async function generateHTTPStream(payload) {
 
     if (prevChunk) {
       if (done) {
+        // Trailer may span the boundary between prevChunk and the previous data.
+        // Also try combining last two chunks if trailer not found in prevChunk alone.
         const result = extractTrailer(prevChunk);
         if (result) {
           serverMeta = result.meta;
@@ -453,6 +469,11 @@ async function generateHTTPStream(payload) {
   appendLog(`Client RTF: ${clientRtf.toFixed(4)}`);
 
   if (serverMeta) {
+    if (serverMeta.preprocessed_text) {
+      const ver = serverMeta.pron_dic_version ? ` (pron_dic: ${serverMeta.pron_dic_version})` : '';
+      appendLog(`-- Preprocessed text${ver} --`);
+      appendLog(serverMeta.preprocessed_text);
+    }
     appendLog(`-- Server metrics --`);
     appendLog(`Processing time: ${serverMeta.processing_time}s`);
     appendLog(`TTFB: ${serverMeta.ttfb}s`);
