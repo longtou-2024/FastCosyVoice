@@ -239,6 +239,13 @@ def init_pipeline(config_path: str):
 
         default_caption = '"약하게" "기쁜" 감정이고 "독백체" 스타일<|endofprompt|>'
 
+        # Free Qwen3 model — only needed during speaker registration
+        _log_memory("Before Qwen3 cleanup")
+        del model.frontend.Qwen3
+        del model.frontend.tokenizer_q_3
+        import gc; gc.collect()
+        _log_memory("After Qwen3 cleanup")
+
         # Final cleanup: delete speaker files and anything remaining
         if gcs_path:
             shutil.rmtree("/tmp/model", ignore_errors=True)
