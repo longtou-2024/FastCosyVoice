@@ -14,5 +14,29 @@ speakers:
     audio: data/speakers/oneyoung/oneyoung.wav
   - name: 이병헌
     audio: data/speakers/byeongheon/byeongheon.wav
+  - name: 박보검_0_0
+    audio: data/speakers/pbg/pbg_0_0.wav
+  - name: 박보검_10_124
+    audio: data/speakers/pbg/pbg_10_124.wav
+  - name: 박보검_10_24
+    audio: data/speakers/pbg/pbg_10_24.wav
+  - name: 박보검_10_52
+    audio: data/speakers/pbg/pbg_10_52.wav
+  - name: 박보검_15_124
+    audio: data/speakers/pbg/pbg_15_124.wav
+  - name: 박보검_15_28
+    audio: data/speakers/pbg/pbg_15_28.wav
+  - name: 박보검_15_69
+    audio: data/speakers/pbg/pbg_15_69.wav
+  - name: 박보검_16_9
+    audio: data/speakers/pbg/pbg_16_9.wav
+  - name: 박보검_18_1
+    audio: data/speakers/pbg/pbg_18_1.wav
+  - name: 박보검_3_12
+    audio: data/speakers/pbg/pbg_3_12.wav
+  - name: 박보검_3_5
+    audio: data/speakers/pbg/pbg_3_5.wav
+  - name: 박보검_4_15
+    audio: data/speakers/pbg/pbg_4_15.wav
 
 pron_dic: "/home/longtou.2024/mount/longtou/saved/cloud_run/pron_dic/20260331/pron_data"
