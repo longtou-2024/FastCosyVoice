@@ -38,5 +38,9 @@ speakers:
     audio: data/speakers/pbg/pbg_3_5.wav
   - name: 박보검_4_15
     audio: data/speakers/pbg/pbg_4_15.wav
+  - name: 박보검_16_8
+    audio: data/speakers/pbg/pbg_16_8.wav
+  - name: 박보검_custum3
+    audio: data/speakers/pbg/pbg_custum3.wav
 
 pron_dic: "/home/longtou.2024/mount/longtou/saved/cloud_run/pron_dic/20260331/pron_data"
