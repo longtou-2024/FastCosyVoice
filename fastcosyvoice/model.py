@@ -121,8 +121,8 @@ class FastCosyVoice3Model:
         return {"encoder_caches": encoder_caches, "decoder_cache": decoder_cache}
 
     # ── decoder_cache batch dimension map ────────────────────────────────
-    # key                      → (batch_dim, is_cfg_doubled)
-    _DCACHE_BATCH_DIM = {
+    # key → B2 dim (CFG-doubled: [cond_0..cond_N-1, uncond_0..uncond_N-1])
+    _DECODER_CACHE_B2_DIM = {
         "down_blocks_conv_cache":  2,   # [n_t, 1,  B2, 832,  2]
         "down_blocks_kv_cache":    3,   # [n_t, 1,  4,  B2, cs, 512, 2]
         "mid_blocks_conv_cache":   2,   # [n_t, 12, B2, 512,  2]
@@ -132,45 +132,48 @@ class FastCosyVoice3Model:
         "final_blocks_conv_cache": 1,   # [n_t, B2, 256, 2]
     }
 
-    @staticmethod
-    def _merge_flow_caches(per_sample_caches: list) -> dict:
-        """Merge N per-sample flow caches (B=1 each) into one batched cache (B=N).
+    def _merge_flow_caches(self, flow_caches: list, sample_indices: List[int]) -> dict:
+        """Merge per-sample flow caches (each batch=1) into a single batched cache.
 
-        encoder_caches: list concat
-        decoder_cache:  concat along CFG-batch dim (B2=2 per sample → 2*N)
+        Decoder expects B2 ordering: [cond_0, cond_1, ..., uncond_0, uncond_1, ...]
+        Per-sample cache has B2=2:   [cond_i, uncond_i]
         """
         merged_enc = []
-        for c in per_sample_caches:
-            merged_enc.extend(c["encoder_caches"])
+        for idx in sample_indices:
+            merged_enc.extend(flow_caches[idx]['encoder_caches'])
 
-        # decoder_cache: concat tensors, keep 'offset' scalar
-        first_dc = per_sample_caches[0]["decoder_cache"]
-        merged_dc = {"offset": first_dc["offset"]}
-        for key, bdim in FastCosyVoice3Model._DCACHE_BATCH_DIM.items():
-            merged_dc[key] = torch.cat(
-                [c["decoder_cache"][key] for c in per_sample_caches], dim=bdim
-            )
+        first_dec = flow_caches[sample_indices[0]]['decoder_cache']
+        merged_dec = {'offset': first_dec['offset']}
+        for key, b2_dim in self._DECODER_CACHE_B2_DIM.items():
+            if key in first_dec:
+                # Separate cond (index 0) and uncond (index 1) from each sample,
+                # then concat as [all_conds..., all_unconds...]
+                conds = [flow_caches[idx]['decoder_cache'][key].narrow(b2_dim, 0, 1) for idx in sample_indices]
+                unconds = [flow_caches[idx]['decoder_cache'][key].narrow(b2_dim, 1, 1) for idx in sample_indices]
+                merged_dec[key] = torch.cat(conds + unconds, dim=b2_dim)
 
-        return {"encoder_caches": merged_enc, "decoder_cache": merged_dc}
+        return {'encoder_caches': merged_enc, 'decoder_cache': merged_dec}
 
-    @staticmethod
-    def _split_flow_caches(merged_cache: dict, num_samples: int) -> list:
-        """Split a batched flow cache back into N per-sample caches (B=1 each).
+    def _split_flow_caches(self, merged_cache: dict, flow_caches: list, sample_indices: List[int]):
+        """Split batched cache back into per-sample flow caches (batch=1 each).
 
-        decoder_cache tensors are split along CFG-batch dim (2*N → N chunks of 2).
+        Decoder B2 ordering: [cond_0, cond_1, ..., uncond_0, uncond_1, ...]
+        Need to reconstruct per-sample: [cond_i, uncond_i]
         """
-        enc_list = merged_cache["encoder_caches"]
-        per_sample = []
-        for i in range(num_samples):
-            dc_i = {"offset": merged_cache["decoder_cache"]["offset"]}
-            for key, bdim in FastCosyVoice3Model._DCACHE_BATCH_DIM.items():
-                slices = merged_cache["decoder_cache"][key].split(2, dim=bdim)
-                dc_i[key] = slices[i]
-            per_sample.append({
-                "encoder_caches": [enc_list[i]],
-                "decoder_cache": dc_i,
-            })
-        return per_sample
+        N = len(sample_indices)
+        updated_enc = merged_cache['encoder_caches']
+        updated_dec = merged_cache['decoder_cache']
+
+        for i, sample_idx in enumerate(sample_indices):
+            flow_caches[sample_idx]['encoder_caches'] = [updated_enc[i]]
+            flow_caches[sample_idx]['decoder_cache'] = {'offset': updated_dec['offset']}
+            for key, b2_dim in self._DECODER_CACHE_B2_DIM.items():
+                if key in updated_dec:
+                    cond_slice = updated_dec[key].narrow(b2_dim, i, 1)
+                    uncond_slice = updated_dec[key].narrow(b2_dim, N + i, 1)
+                    flow_caches[sample_idx]['decoder_cache'][key] = (
+                        torch.cat([cond_slice, uncond_slice], dim=b2_dim).contiguous()
+                    )
 
     def load(self, llm_model: str, flow_model: str, hift_model: str, *, load_llm: bool = True):
         """Load model weights from files.
@@ -295,8 +298,8 @@ class FastCosyVoice3Model:
         cfg_min_batch = 2
         cfg_max_batch = max(2, int(max_batch_size) * 2)
         cfg_opt_batch = cfg_max_batch
-        min_seq, opt_seq, max_seq = 4, 50, 500
-        min_cache, opt_cache, max_cache = 0, 150, 500
+        min_seq, opt_seq, max_seq = 4, 50, 1000
+        min_cache, opt_cache, max_cache = 0, 50, 50
         input_names = [
             "x", "mask", "mu", "t", "spks", "cond",
             "down_blocks_conv_cache", "down_blocks_kv_cache",
@@ -585,8 +588,7 @@ class FastCosyVoice3Model:
             )  # [B, 192]
 
             # ── Merge per-sample caches → single batched cache ───────────
-            selected_caches = [flow_caches[si] for si in valid_indices]
-            merged_cache = self._merge_flow_caches(selected_caches)
+            merged_cache = self._merge_flow_caches(flow_caches, valid_indices)
 
             # ── Single batched flow.inference call ───────────────────────
             flow_start = time.time()
@@ -605,9 +607,7 @@ class FastCosyVoice3Model:
             total_flow_time = time.time() - flow_start
 
             # ── Split cache back to per-sample ───────────────────────────
-            split_caches = self._split_flow_caches(merged_cache, B)
-            for i, sample_idx in enumerate(valid_indices):
-                flow_caches[sample_idx] = split_caches[i]
+            self._split_flow_caches(merged_cache, flow_caches, valid_indices)
 
             # ── Distribute results to per-sample mels ────────────────────
             # Build full sample_mels list (including empties for skipped samples)
