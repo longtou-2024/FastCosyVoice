@@ -1,16 +1,18 @@
+data_root: /home/longtou.2024/projects/FastCosyVoice/data
+
 model:
-  model_dir: data/models/Fun-CosyVoice3-0.5B
-  llm_checkpoint: data/checkpoints_v2/llm/ave_v1.pt
-  flow_checkpoint: data/checkpoints_v2/flow/ave_flow_v1.pt
-  hift_checkpoint: data/checkpoints/hift.pt
-  qwen3_dir: data/checkpoints/Qwen3-1.7B
+  model_dir: ${data_root}/models/Fun-CosyVoice3-0.5B
+  llm_checkpoint: ${data_root}/checkpoints_v2/llm/ave_v1.pt
+  flow_checkpoint: ${data_root}/checkpoints_v2/flow/ave_flow_v1.pt
+  hift_checkpoint: ${data_root}/checkpoints/hift.pt
+  qwen3_dir: ${data_root}/checkpoints/Qwen3-1.7B
 
 speakers:
   - name: 장원영_가이드
-    audio: data/speakers/oneyoung/oneyoung_guide.wav
+    audio: ${data_root}/speakers/oneyoung/oneyoung_guide.wav
   - name: 아이유
-    audio: data/speakers/iu/killing_voice_iu_edit_short2_cut1.wav
+    audio: ${data_root}/speakers/iu/killing_voice_iu_edit_short2_cut1.wav
   - name: 장원영
-    audio: data/speakers/oneyoung/oneyoung.wav
+    audio: ${data_root}/speakers/oneyoung/oneyoung.wav
   - name: 이병헌
-    audio: data/speakers/byeongheon/byeongheon.wav
+    audio: ${data_root}/speakers/byeongheon/byeongheon.wav

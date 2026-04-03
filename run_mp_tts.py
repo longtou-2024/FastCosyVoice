@@ -14,7 +14,7 @@ import wave
 from pathlib import Path
 
 import torch
-import yaml
+from omegaconf import OmegaConf
 
 sys.path.append("third_party/Matcha-TTS")
 
@@ -30,17 +30,16 @@ logger = logging.getLogger(__name__)
 
 # ── Load config ──────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent
-with open(_PROJECT_ROOT / "config.yaml", "r") as f:
-    _cfg = yaml.safe_load(f)
+_cfg = OmegaConf.load(_PROJECT_ROOT / "config.yaml")
 
-MODEL_DIR      = str(_PROJECT_ROOT / _cfg["model"]["model_dir"])
-LLM_PT_PATH    = str(_PROJECT_ROOT / _cfg["model"]["llm_checkpoint"])
-FLOW_PT_PATH   = str(_PROJECT_ROOT / _cfg["model"]["flow_checkpoint"])
-HIFT_PT_PATH   = str(_PROJECT_ROOT / _cfg["model"]["hift_checkpoint"])
+MODEL_DIR      = _cfg["model"]["model_dir"]
+LLM_PT_PATH    = _cfg["model"]["llm_checkpoint"]
+FLOW_PT_PATH   = _cfg["model"]["flow_checkpoint"]
+HIFT_PT_PATH   = _cfg["model"]["hift_checkpoint"]
 
 # ── Speaker definitions (from config.yaml "아이유") ──────────────────────
 _iu_cfg = next(s for s in _cfg["speakers"] if s["name"] == "아이유")
-_iu_audio = _PROJECT_ROOT / _iu_cfg["audio"]
+_iu_audio = Path(_iu_cfg["audio"])
 _iu_prompt_txt = _iu_audio.with_suffix(".txt")
 SPEAKERS = {
     "iu": {

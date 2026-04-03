@@ -5,7 +5,7 @@ import time
 import os
 import logging
 from pathlib import Path
-import yaml
+from omegaconf import OmegaConf
 sys.path.append('third_party/Matcha-TTS')
 
 import torch
@@ -33,16 +33,15 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / 'config.yaml'
 
-with open(CONFIG_PATH, 'r', encoding='utf-8') as _f:
-    _config = yaml.safe_load(_f)
+_config = OmegaConf.load(CONFIG_PATH)
 
-MODEL_DIR = str(PROJECT_ROOT / _config['model']['model_dir'])
-LLM_PT_PATH = str(PROJECT_ROOT / _config['model']['llm_checkpoint'])
-FLOW_PT_PATH = str(PROJECT_ROOT / _config['model']['flow_checkpoint'])
-HIFT_PT_PATH = str(PROJECT_ROOT / _config['model']['hift_checkpoint'])
-QWEN3_DIR = str(PROJECT_ROOT / _config['model']['qwen3_dir'])
+MODEL_DIR = _config['model']['model_dir']
+LLM_PT_PATH = _config['model']['llm_checkpoint']
+FLOW_PT_PATH = _config['model']['flow_checkpoint']
+HIFT_PT_PATH = _config['model']['hift_checkpoint']
+QWEN3_DIR = _config['model']['qwen3_dir']
 
-SPEAKER_PATHS = [str(PROJECT_ROOT / s['audio']) for s in _config['speakers']]
+SPEAKER_PATHS = [s['audio'] for s in _config['speakers']]
 
 def _load_txt_for_audio(audio_path: str) -> str:
     """Read the .txt file next to an audio file (same name, .txt extension)."""
