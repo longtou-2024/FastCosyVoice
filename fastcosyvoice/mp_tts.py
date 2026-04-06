@@ -84,6 +84,7 @@ class MultiProcessTTS:
         flow_trt_max_batch_size: int = 8,
         llm_device: str = 'cuda:0',
         flow_devices: Optional[List[str]] = None,
+        qwen3_dir: str = None,
     ):
         self.model_dir = model_dir
         self.fp16 = fp16
@@ -110,6 +111,7 @@ class MultiProcessTTS:
             os.path.join(model_dir, 'speech_tokenizer_v3.onnx'),
             os.path.join(model_dir, 'spk2info.pt'),
             configs['allowed_special'],
+            qwen3_model_dir=qwen3_dir,
         )
         del configs
 

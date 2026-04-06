@@ -36,6 +36,7 @@ MODEL_DIR      = _cfg["model"]["model_dir"]
 LLM_PT_PATH    = _cfg["model"]["llm_checkpoint"]
 FLOW_PT_PATH   = _cfg["model"]["flow_checkpoint"]
 HIFT_PT_PATH   = _cfg["model"]["hift_checkpoint"]
+QWEN3_DIR      = _cfg["model"]["qwen3_dir"]
 
 # ── Speaker definitions (from config.yaml "아이유") ──────────────────────
 _iu_cfg = next(s for s in _cfg["speakers"] if s["name"] == "아이유")
@@ -164,6 +165,7 @@ def main():
         flow_trt_max_batch_size=8,
         llm_device='cuda:0',
         flow_devices=['cuda:0','cuda:0'],  # 2 Flow procs, each batch=8 → LLM batch=16
+        qwen3_dir=QWEN3_DIR,
     )
     logger.info("Processes started in %.2f sec", time.time() - load_start)
 

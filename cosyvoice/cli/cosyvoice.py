@@ -210,6 +210,10 @@ class CosyVoice3(CosyVoice2):
             load_trt, fp16 = False, False
             logging.warning('no cuda device, set load_trt/fp16 to False')
         self.model = CosyVoice3Model(configs['llm'], configs['flow'], configs['hift'], fp16)
+        raise NotImplementedError(
+            'CosyVoice3: llm checkpoint path is hardcoded. '
+            'Use FastCosyVoice3 (fastcosyvoice/cosyvoice.py) or MultiProcessTTS instead.'
+        )
         self.model.load('/home/kayden.k/FastCosyVoice/pretrained_models/epoch_0_step_105000.pt',
                         '{}/flow.pt'.format(model_dir),
                         '{}/hift.pt'.format(model_dir))
